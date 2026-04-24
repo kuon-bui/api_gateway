@@ -12,11 +12,11 @@
 server:
   port: 8080
   read_timeout_ms: 5000
-  write_timeout_ms: 10000
+  write_timeout_ms: 0
   idle_timeout_ms: 60000
 
 proxy:
-  timeout_ms: 15000
+  timeout_ms: 0
 
 security:
   jwt:
@@ -49,7 +49,9 @@ routes:
 - `path_prefix` must start with `/`.
 - `upstream` must be valid HTTP/HTTPS URL.
 - `methods` must contain valid HTTP methods.
-- Timeout and rate values must be positive.
+- `read_timeout_ms`, `idle_timeout_ms`, and rate values must be positive.
+- `write_timeout_ms` must be zero or positive (`0` disables write timeout for long-lived streams like SSE).
+- `proxy.timeout_ms` must be zero or positive (`0` disables upstream connect timeout).
 
 ## 4. Resolution Strategy
 

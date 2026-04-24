@@ -59,11 +59,14 @@ func (c Config) Validate() error {
 	if c.Server.Port <= 0 {
 		return errors.New("server.port must be positive")
 	}
-	if c.Server.ReadTimeoutMS <= 0 || c.Server.WriteTimeoutMS <= 0 || c.Server.IdleTimeoutMS <= 0 {
-		return errors.New("server timeouts must be positive")
+	if c.Server.ReadTimeoutMS <= 0 || c.Server.IdleTimeoutMS <= 0 {
+		return errors.New("server read_timeout_ms and idle_timeout_ms must be positive")
 	}
-	if c.Proxy.TimeoutMS <= 0 {
-		return errors.New("proxy.timeout_ms must be positive")
+	if c.Server.WriteTimeoutMS < 0 {
+		return errors.New("server.write_timeout_ms must be zero or positive")
+	}
+	if c.Proxy.TimeoutMS < 0 {
+		return errors.New("proxy.timeout_ms must be zero or positive")
 	}
 	if c.Security.JWT.Enabled && c.Security.JWT.HMACSecret == "" {
 		return errors.New("security.jwt.hmac_secret is required when JWT is enabled")

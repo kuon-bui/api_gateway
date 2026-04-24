@@ -24,3 +24,71 @@ func TestValidateFailsWithoutRoutes(t *testing.T) {
 		t.Fatal("expected validation error")
 	}
 }
+
+func TestValidateAllowsZeroWriteTimeout(t *testing.T) {
+	cfg := Config{
+		Server: ServerConfig{Port: 8080, ReadTimeoutMS: 1, WriteTimeoutMS: 0, IdleTimeoutMS: 1},
+		Proxy:  ProxyConfig{TimeoutMS: 1},
+		Routes: []RouteConfig{{
+			Name:       "events",
+			Methods:    []string{"GET"},
+			PathPrefix: "/events",
+			Upstream:   "http://localhost:9001",
+		}},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid config, got error: %v", err)
+	}
+}
+
+func TestValidateFailsNegativeWriteTimeout(t *testing.T) {
+	cfg := Config{
+		Server: ServerConfig{Port: 8080, ReadTimeoutMS: 1, WriteTimeoutMS: -1, IdleTimeoutMS: 1},
+		Proxy:  ProxyConfig{TimeoutMS: 1},
+		Routes: []RouteConfig{{
+			Name:       "events",
+			Methods:    []string{"GET"},
+			PathPrefix: "/events",
+			Upstream:   "http://localhost:9001",
+		}},
+	}
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for negative write timeout")
+	}
+}
+
+func TestValidateAllowsZeroProxyTimeout(t *testing.T) {
+	cfg := Config{
+		Server: ServerConfig{Port: 8080, ReadTimeoutMS: 1, WriteTimeoutMS: 0, IdleTimeoutMS: 1},
+		Proxy:  ProxyConfig{TimeoutMS: 0},
+		Routes: []RouteConfig{{
+			Name:       "events",
+			Methods:    []string{"GET"},
+			PathPrefix: "/events",
+			Upstream:   "http://localhost:9001",
+		}},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid config, got error: %v", err)
+	}
+}
+
+func TestValidateFailsNegativeProxyTimeout(t *testing.T) {
+	cfg := Config{
+		Server: ServerConfig{Port: 8080, ReadTimeoutMS: 1, WriteTimeoutMS: 0, IdleTimeoutMS: 1},
+		Proxy:  ProxyConfig{TimeoutMS: -1},
+		Routes: []RouteConfig{{
+			Name:       "events",
+			Methods:    []string{"GET"},
+			PathPrefix: "/events",
+			Upstream:   "http://localhost:9001",
+		}},
+	}
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for negative proxy timeout")
+	}
+}

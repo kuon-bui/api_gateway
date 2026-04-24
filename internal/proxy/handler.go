@@ -34,18 +34,15 @@ type routeInfo struct {
 type Handler struct {
 	resolver *app.Resolver
 	proxy    *httputil.ReverseProxy
-	timeout  time.Duration
 }
 
 func NewHandler(resolver *app.Resolver, timeout time.Duration) *Handler {
-	h := &Handler{
-		resolver: resolver,
-		timeout:  timeout,
-	}
+	h := &Handler{resolver: resolver}
 	h.proxy = &httputil.ReverseProxy{
-		Director:     h.director,
-		Transport:    newTransport(timeout),
-		ErrorHandler: h.errorHandler,
+		Director:      h.director,
+		Transport:     newTransport(timeout),
+		FlushInterval: -1,
+		ErrorHandler:  h.errorHandler,
 	}
 	return h
 }
@@ -89,12 +86,9 @@ func (h *Handler) ServeHTTP(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), h.timeout)
-	defer cancel()
-
 	// Store route info in request context so Director can access it.
 	c.Request = c.Request.WithContext(
-		context.WithValue(ctx, routeKey, info),
+		context.WithValue(c.Request.Context(), routeKey, info),
 	)
 
 	h.proxy.ServeHTTP(c.Writer, c.Request)
