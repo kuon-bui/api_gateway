@@ -2,7 +2,9 @@ package middleware
 
 import (
 	"fmt"
+	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -18,6 +20,18 @@ func AccessLog(logger *logrus.Logger) gin.HandlerFunc {
 
 	return func(c *gin.Context) {
 		start := time.Now()
+		if isWebSocketUpgradeRequest(c) {
+			accessLogger.WithFields(logrus.Fields{
+				"request_id": c.GetHeader("X-Request-ID"),
+				"method":     c.Request.Method,
+				"path":       c.Request.URL.Path,
+				"status":     http.StatusSwitchingProtocols,
+				"latency_ms": int64(0),
+				"route_name": "",
+				"upstream":   "",
+				"protocol":   "websocket",
+			}).Info("websocket request started")
+		}
 		c.Next()
 
 		latency := time.Since(start)
@@ -57,6 +71,11 @@ func AccessLog(logger *logrus.Logger) gin.HandlerFunc {
 
 		accessLogger.WithFields(fields).Info("request completed")
 	}
+}
+
+func isWebSocketUpgradeRequest(c *gin.Context) bool {
+	return strings.EqualFold(c.GetHeader("Upgrade"), "websocket") &&
+		strings.Contains(strings.ToLower(c.GetHeader("Connection")), "upgrade")
 }
 
 func toString(v any) string {

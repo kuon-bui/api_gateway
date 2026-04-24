@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/sirupsen/logrus"
@@ -21,12 +22,26 @@ const (
 
 const (
 	statusWidth    = 3
-	methodWidth    = 7
-	pathWidth      = 44
+	methodWidth    = 4
+	pathWidth      = 80
 	latencyWidth   = 6
 	routeWidth     = 10
 	requestIDWidth = 32
+	pathEllipsis   = "..."
+	pathSeparator  = " => "
 )
+
+var methodAbbreviations = map[string]string{
+	http.MethodGet:     "GET",
+	http.MethodHead:    "HEAD",
+	http.MethodPost:    "POST",
+	http.MethodPut:     "PUT",
+	http.MethodPatch:   "PCH",
+	http.MethodDelete:  "DEL",
+	http.MethodConnect: "CONN",
+	http.MethodOptions: "OPT",
+	http.MethodTrace:   "TRCE",
+}
 
 // AccessLogFormatter formats access log entries as:
 //
@@ -46,9 +61,13 @@ func (f *AccessLogFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 	requestID, _ := entry.Data["request_id"].(string)
 
 	statusField := fmt.Sprintf("%*d", statusWidth, status)
-	methodField := fmt.Sprintf("%-*s", methodWidth, method)
-	pathField := fmt.Sprintf("%-*s", pathWidth, trimToWidth(path, pathWidth))
-	latencyField := fmt.Sprintf("%*s", latencyWidth, fmt.Sprintf("%dms", latencyMS))
+	methodField := fmt.Sprintf("%-*s", methodWidth, trimMethodToWidth(method, methodWidth))
+	pathField := fmt.Sprintf("%-*s", pathWidth, trimPathToWidth(path, pathWidth))
+	latencyDisplay := "-ms"
+	if latencyMS != 0 {
+		latencyDisplay = fmt.Sprintf("%dms", latencyMS)
+	}
+	latencyField := fmt.Sprintf("%*s", latencyWidth, latencyDisplay)
 	routeField := fmt.Sprintf("%-*s", routeWidth, bracket(routeName))
 	requestIDField := trimToWidth(requestID, requestIDWidth)
 
@@ -96,4 +115,61 @@ func trimToWidth(value string, width int) string {
 		return trimmed
 	}
 	return trimmed[:width-1] + "~"
+}
+
+func trimMethodToWidth(method string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+
+	trimmed := strings.ToUpper(strings.TrimSpace(method))
+	abbr, ok := methodAbbreviations[trimmed]
+	if ok {
+		return abbr
+	}
+
+	if len(trimmed) <= width {
+		return trimmed
+	}
+
+	return trimmed[:width]
+}
+
+func trimPathToWidth(path string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+
+	trimmed := strings.TrimSpace(path)
+	if len(trimmed) <= width {
+		return trimmed
+	}
+
+	parts := strings.SplitN(trimmed, pathSeparator, 2)
+	if len(parts) == 2 {
+		prefix := strings.TrimSpace(parts[0]) + pathSeparator
+		tail := strings.TrimSpace(parts[1])
+		if len(prefix) < width {
+			return prefix + trimPathTail(tail, width-len(prefix))
+		}
+	}
+
+	return trimPathTail(trimmed, width)
+}
+
+func trimPathTail(path string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+
+	if len(path) <= width {
+		return path
+	}
+
+	if width <= len(pathEllipsis) {
+		return pathEllipsis[:width]
+	}
+
+	tailWidth := width - len(pathEllipsis)
+	return pathEllipsis + path[len(path)-tailWidth:]
 }
