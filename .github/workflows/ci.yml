@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  test-and-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify formatting
+        run: |
+          gofmt -l . > /tmp/gofmt.out
+          if [ -s /tmp/gofmt.out ]; then
+            echo "Files not formatted:"
+            cat /tmp/gofmt.out
+            exit 1
+          fi
+
+      - name: Install goimports
+        run: go install golang.org/x/tools/cmd/goimports@latest
+
+      - name: Verify imports
+        run: |
+          FILES=$(find . -name '*.go' -not -path './vendor/*')
+          if [ -n "$FILES" ]; then
+            $(go env GOPATH)/bin/goimports -l $FILES > /tmp/goimports.out
+            if [ -s /tmp/goimports.out ]; then
+              echo "Files with non-canonical imports:"
+              cat /tmp/goimports.out
+              exit 1
+            fi
+          fi
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.64.8
+
+      - name: Unit tests
+        run: go test ./...
+
+      - name: Race tests
+        run: go test -race ./...
+
+      - name: Build
+        run: go build ./cmd/gateway
