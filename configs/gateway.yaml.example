@@ -25,13 +25,26 @@ routes:
     methods: ["GET", "POST"]
     path_prefix: "/users"
     upstream: "http://localhost:9001"
+    trim_path: true
+    rate_limit:
+      enabled: true
+      rps: 20
+      burst: 40
 
   - name: crg
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
     path_prefix: "/crg/api"
     upstream: "http://localhost:8082"
+    trim_path: true
+    rate_limit:
+      enabled: true
+      rps: 20
+      burst: 40
   
   - name: crg-fe
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
     path_prefix: "/crg"
     upstream: "http://localhost:5173"
+    trim_path: false
+    rate_limit:
+      enabled: false

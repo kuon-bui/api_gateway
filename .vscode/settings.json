@@ -2,6 +2,7 @@
   "cSpell.words": [
     "gonic",
     "healthz",
+    "mapstructure",
     "promhttp",
     "readyz",
     "sirupsen"

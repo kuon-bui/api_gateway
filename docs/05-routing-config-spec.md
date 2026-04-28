@@ -35,11 +35,17 @@ routes:
     methods: ["GET", "POST"]
     path_prefix: "/users"
     upstream: "http://user-service:9001"
+    rate_limit:
+      enabled: true
+      rps: 10
+      burst: 20
 
   - name: orders
     methods: ["GET"]
     path_prefix: "/orders"
     upstream: "http://order-service:9002"
+    rate_limit:
+      enabled: false
 ```
 
 ## 3. Validation Rules
@@ -52,11 +58,14 @@ routes:
 - `read_timeout_ms`, `idle_timeout_ms`, and rate values must be positive.
 - `write_timeout_ms` must be zero or positive (`0` disables write timeout for long-lived streams like SSE).
 - `proxy.timeout_ms` must be zero or positive (`0` disables upstream connect timeout).
+- `routes[*].rate_limit` is optional.
+- If `routes[*].rate_limit.enabled=true`, both `routes[*].rate_limit.rps` and `routes[*].rate_limit.burst` must be positive.
 
 ## 4. Resolution Strategy
 
 - Match by HTTP method first.
 - Then match longest `path_prefix`.
+- Rate limiting precedence: route rate limit override (if configured) takes priority over global `rate_limit`.
 - If no route matches, return `404` gateway route-not-found response.
 
 ## 5. Error Contract (proposed)

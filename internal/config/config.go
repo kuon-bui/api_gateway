@@ -48,11 +48,19 @@ type RateLimitConfig struct {
 	TrustedProxies []string `yaml:"trusted_proxies"  mapstructure:"trusted_proxies"`
 }
 
+type RouteRateLimitConfig struct {
+	Enabled bool `yaml:"enabled" mapstructure:"enabled"`
+	RPS     int  `yaml:"rps"     mapstructure:"rps"`
+	Burst   int  `yaml:"burst"   mapstructure:"burst"`
+}
+
 type RouteConfig struct {
-	Name       string   `yaml:"name"        mapstructure:"name"`
-	Methods    []string `yaml:"methods"     mapstructure:"methods"`
-	PathPrefix string   `yaml:"path_prefix" mapstructure:"path_prefix"`
-	Upstream   string   `yaml:"upstream"    mapstructure:"upstream"`
+	Name       string                `yaml:"name"        mapstructure:"name"`
+	Methods    []string              `yaml:"methods"     mapstructure:"methods"`
+	PathPrefix string                `yaml:"path_prefix" mapstructure:"path_prefix"`
+	Upstream   string                `yaml:"upstream"    mapstructure:"upstream"`
+	TrimPath   bool                  `yaml:"trim_path"   mapstructure:"trim_path"`
+	RateLimit  *RouteRateLimitConfig `yaml:"rate_limit,omitempty" mapstructure:"rate_limit"`
 }
 
 func (c Config) Validate() error {
@@ -109,6 +117,11 @@ func (c Config) Validate() error {
 		}
 		if _, err := url.ParseRequestURI(rt.Upstream); err != nil {
 			return fmt.Errorf("routes[%d].upstream is invalid: %w", i, err)
+		}
+		if rt.RateLimit != nil && rt.RateLimit.Enabled {
+			if rt.RateLimit.RPS <= 0 || rt.RateLimit.Burst <= 0 {
+				return fmt.Errorf("routes[%d].rate_limit.rps and routes[%d].rate_limit.burst must be positive", i, i)
+			}
 		}
 	}
 

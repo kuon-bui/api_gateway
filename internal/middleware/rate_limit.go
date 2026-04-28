@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"api-gateway/internal/app"
 	"api-gateway/internal/config"
 	"api-gateway/internal/domain"
 
@@ -60,19 +61,43 @@ func (s *limiterStore) gc(ttl time.Duration) {
 	}
 }
 
-func RateLimit(cfg config.RateLimitConfig) gin.HandlerFunc {
-	if !cfg.Enabled {
+func RateLimit(globalCfg config.RateLimitConfig, resolver *app.Resolver) gin.HandlerFunc {
+	headerName := globalCfg.APIKeyHeader
+	if headerName == "" {
+		headerName = "X-API-Key"
+	}
+
+	var globalStore *limiterStore
+	if globalCfg.Enabled {
+		globalStore = newLimiterStore(globalCfg.RPS, globalCfg.Burst)
+		go globalStore.gc(10 * time.Minute)
+	}
+
+	routeStores := make(map[string]*limiterStore)
+	var routeStoresMu sync.Mutex
+	getRouteStore := func(route domain.Route) *limiterStore {
+		if route.RateLimit == nil || !route.RateLimit.Enabled {
+			return nil
+		}
+
+		routeStoresMu.Lock()
+		defer routeStoresMu.Unlock()
+
+		store, ok := routeStores[route.Name]
+		if ok {
+			return store
+		}
+
+		store = newLimiterStore(route.RateLimit.RPS, route.RateLimit.Burst)
+		routeStores[route.Name] = store
+		go store.gc(10 * time.Minute)
+		return store
+	}
+
+	if globalStore == nil && resolver == nil {
 		return func(c *gin.Context) {
 			c.Next()
 		}
-	}
-
-	store := newLimiterStore(cfg.RPS, cfg.Burst)
-	go store.gc(10 * time.Minute)
-
-	headerName := cfg.APIKeyHeader
-	if headerName == "" {
-		headerName = "X-API-Key"
 	}
 
 	return func(c *gin.Context) {
@@ -80,7 +105,30 @@ func RateLimit(cfg config.RateLimitConfig) gin.HandlerFunc {
 		if key == "" {
 			key = c.ClientIP()
 		}
-		if !store.get(key).Allow() {
+
+		var limiter *rate.Limiter
+		if resolver != nil {
+			route, ok := resolver.Match(c.Request.Method, c.Request.URL.Path)
+			if ok && route.RateLimit != nil {
+				if !route.RateLimit.Enabled {
+					c.Next()
+					return
+				}
+				if store := getRouteStore(route); store != nil {
+					limiter = store.get(key)
+				}
+			}
+		}
+
+		if limiter == nil {
+			if globalStore == nil {
+				c.Next()
+				return
+			}
+			limiter = globalStore.get(key)
+		}
+
+		if !limiter.Allow() {
 			domain.WriteError(c, http.StatusTooManyRequests, "RATE_LIMIT_EXCEEDED", "Too many requests")
 			c.Abort()
 			return

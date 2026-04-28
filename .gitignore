@@ -3,3 +3,5 @@ bin/
 *.log
 gateway
 !cmd/*
+configs/*
+!configs/gateway.yaml.example

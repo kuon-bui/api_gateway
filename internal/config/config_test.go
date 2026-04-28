@@ -92,3 +92,47 @@ func TestValidateFailsNegativeProxyTimeout(t *testing.T) {
 		t.Fatal("expected validation error for negative proxy timeout")
 	}
 }
+
+func TestValidateAllowsEnabledRouteRateLimit(t *testing.T) {
+	cfg := Config{
+		Server: ServerConfig{Port: 8080, ReadTimeoutMS: 1, WriteTimeoutMS: 1, IdleTimeoutMS: 1},
+		Proxy:  ProxyConfig{TimeoutMS: 1},
+		Routes: []RouteConfig{{
+			Name:       "events",
+			Methods:    []string{"GET"},
+			PathPrefix: "/events",
+			Upstream:   "http://localhost:9001",
+			RateLimit: &RouteRateLimitConfig{
+				Enabled: true,
+				RPS:     10,
+				Burst:   20,
+			},
+		}},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid config, got error: %v", err)
+	}
+}
+
+func TestValidateFailsRouteRateLimitWithInvalidValues(t *testing.T) {
+	cfg := Config{
+		Server: ServerConfig{Port: 8080, ReadTimeoutMS: 1, WriteTimeoutMS: 1, IdleTimeoutMS: 1},
+		Proxy:  ProxyConfig{TimeoutMS: 1},
+		Routes: []RouteConfig{{
+			Name:       "events",
+			Methods:    []string{"GET"},
+			PathPrefix: "/events",
+			Upstream:   "http://localhost:9001",
+			RateLimit: &RouteRateLimitConfig{
+				Enabled: true,
+				RPS:     0,
+				Burst:   20,
+			},
+		}},
+	}
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for invalid route rate_limit values")
+	}
+}

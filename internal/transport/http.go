@@ -16,6 +16,11 @@ import (
 )
 
 func NewServer(cfg config.Config, logger *logrus.Logger) (*http.Server, error) {
+	resolver, err := app.NewResolver(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("build route resolver: %w", err)
+	}
+
 	// gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
 	engine.Use(gin.Recovery())
@@ -24,7 +29,7 @@ func NewServer(cfg config.Config, logger *logrus.Logger) (*http.Server, error) {
 	engine.Use(middleware.PrometheusMetrics())
 	engine.Use(middleware.AccessLog(logger))
 	// engine.Use(middleware.JWTAuth(cfg.Security.JWT))
-	engine.Use(middleware.RateLimit(cfg.RateLimit))
+	engine.Use(middleware.RateLimit(cfg.RateLimit, resolver))
 
 	engine.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
@@ -34,10 +39,6 @@ func NewServer(cfg config.Config, logger *logrus.Logger) (*http.Server, error) {
 	})
 	engine.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
-	resolver, err := app.NewResolver(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("build route resolver: %w", err)
-	}
 	proxyHandler := proxy.NewHandler(resolver, cfg.ProxyTimeout())
 
 	engine.NoRoute(func(c *gin.Context) {

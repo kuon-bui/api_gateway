@@ -33,6 +33,8 @@ func NewResolver(cfg config.Config) (*Resolver, error) {
 			Methods:    methods,
 			PathPrefix: rt.PathPrefix,
 			Upstream:   upstreamURL,
+			TrimPath:   rt.TrimPath,
+			RateLimit:  toDomainRouteRateLimit(rt.RateLimit),
 		})
 	}
 
@@ -45,6 +47,17 @@ func NewResolver(cfg config.Config) (*Resolver, error) {
 	}
 
 	return &Resolver{routes: routes}, nil
+}
+
+func toDomainRouteRateLimit(cfg *config.RouteRateLimitConfig) *domain.RouteRateLimit {
+	if cfg == nil {
+		return nil
+	}
+	return &domain.RouteRateLimit{
+		Enabled: cfg.Enabled,
+		RPS:     cfg.RPS,
+		Burst:   cfg.Burst,
+	}
 }
 
 func (r *Resolver) Match(method, path string) (domain.Route, bool) {

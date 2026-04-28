@@ -27,6 +27,7 @@ type routeInfo struct {
 	upstream   *url.URL
 	pathPrefix string
 	name       string
+	trimPath   bool
 }
 
 // Handler forwards matched requests to upstream services via httputil.ReverseProxy.
@@ -73,12 +74,17 @@ func (h *Handler) ServeHTTP(c *gin.Context) {
 		upstream:   route.Upstream,
 		pathPrefix: route.PathPrefix,
 		name:       route.Name,
+		trimPath:   route.TrimPath,
 	}
 
 	// Store route metadata for access logging.
 	c.Set("route_name", route.Name)
 	c.Set("upstream", route.Upstream.String())
-	c.Set("trimmed_path", stripPrefix(c.Request.URL.Path, route.PathPrefix))
+	trimmedPath := c.Request.URL.Path
+	if route.TrimPath {
+		trimmedPath = stripPrefix(c.Request.URL.Path, route.PathPrefix)
+	}
+	c.Set("trimmed_path", trimmedPath)
 
 	if isWebSocketUpgrade(c.Request) {
 		c.Set("is_websocket", true)
@@ -104,10 +110,7 @@ func (h *Handler) director(req *http.Request) {
 	target := info.upstream
 	req.URL.Scheme = target.Scheme
 	req.URL.Host = target.Host
-	req.URL.Path = singleJoiningSlash(
-		target.Path,
-		stripPrefix(req.URL.Path, info.pathPrefix),
-	)
+	req.URL.Path = upstreamRequestPath(req.URL.Path, info)
 	// Preserve the Host header as the upstream host.
 	req.Host = target.Host
 	// X-Forwarded-For is appended automatically by httputil.ReverseProxy
@@ -146,10 +149,7 @@ func isWebSocketUpgrade(r *http.Request) bool {
 // bidirectionally. No timeout is applied — the connection lives until either
 // side closes it.
 func (h *Handler) serveWebSocket(c *gin.Context, info routeInfo) {
-	targetPath := singleJoiningSlash(
-		info.upstream.Path,
-		stripPrefix(c.Request.URL.Path, info.pathPrefix),
-	)
+	targetPath := upstreamRequestPath(c.Request.URL.Path, info)
 	upAddr := info.upstream.Host
 
 	// Dial upstream (TLS when scheme is https).
@@ -230,6 +230,14 @@ func (h *Handler) serveWebSocket(c *gin.Context, info routeInfo) {
 	// will naturally exit when clientConn is closed by defer above.
 	go func() { _, _ = io.Copy(upConn, clientBuf) }()
 	_, _ = io.Copy(clientConn, upBufReader)
+}
+
+func upstreamRequestPath(incomingPath string, info routeInfo) string {
+	path := incomingPath
+	if info.trimPath {
+		path = stripPrefix(path, info.pathPrefix)
+	}
+	return singleJoiningSlash(info.upstream.Path, path)
 }
 
 func isTimeoutError(err error) bool {
