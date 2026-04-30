@@ -18,6 +18,7 @@ const (
 	colorRed    = "\033[31m"
 	colorCyan   = "\033[36m"
 	colorBold   = "\033[1m"
+	colorBlue   = "\033[34m"
 )
 
 const (
@@ -45,7 +46,7 @@ var methodAbbreviations = map[string]string{
 
 // AccessLogFormatter formats access log entries as:
 //
-//	2006-01-02 15:04:05  200  POST  /crg/users/sign-in  4ms  crg  b75f5624…
+//	2006-01-02 15:04:05  200  POST  /service-1/users/sign-in  4ms  user  b75f5624…
 type AccessLogFormatter struct{}
 
 func (f *AccessLogFormatter) Format(entry *logrus.Entry) ([]byte, error) {
@@ -63,10 +64,11 @@ func (f *AccessLogFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 	statusField := fmt.Sprintf("%*d", statusWidth, status)
 	methodField := fmt.Sprintf("%-*s", methodWidth, trimMethodToWidth(method, methodWidth))
 	pathField := fmt.Sprintf("%-*s", pathWidth, trimPathToWidth(path, pathWidth))
-	latencyDisplay := "-ms"
+	latencyDisplay := "-"
 	if latencyMS != 0 {
 		latencyDisplay = fmt.Sprintf("%dms", latencyMS)
 	}
+
 	latencyField := fmt.Sprintf("%*s", latencyWidth, latencyDisplay)
 	routeField := fmt.Sprintf("%-*s", routeWidth, bracket(routeName))
 	requestIDField := trimToWidth(requestID, requestIDWidth)
@@ -77,6 +79,10 @@ func (f *AccessLogFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 		statusColor = colorRed
 	case status >= 400:
 		statusColor = colorYellow
+	case status >= 200:
+		statusColor = colorGreen
+	case status >= 100:
+		statusColor = colorBlue
 	}
 
 	fmt.Fprintf(&b, "%s%s%s  ", colorGray, ts, colorReset)
