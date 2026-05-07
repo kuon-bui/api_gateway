@@ -5,6 +5,7 @@
     "mapstructure",
     "promhttp",
     "readyz",
+    "samber",
     "sirupsen",
     "TRCE"
   ]

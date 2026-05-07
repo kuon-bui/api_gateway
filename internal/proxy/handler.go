@@ -5,12 +5,14 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"syscall"
 	"time"
 
 	"api-gateway/internal/app"
@@ -96,6 +98,19 @@ func (h *Handler) ServeHTTP(c *gin.Context) {
 	c.Request = c.Request.WithContext(
 		context.WithValue(c.Request.Context(), routeKey, info),
 	)
+
+	// ReverseProxy can panic with http.ErrAbortHandler when the downstream
+	// client disconnects mid-stream (common with SSE). Treat this as a normal
+	// request termination so access logging still runs, while re-panicking
+	// unexpected values for Recovery middleware to handle.
+	defer func() {
+		if rec := recover(); rec != nil {
+			if isClientDisconnectPanic(rec) {
+				return
+			}
+			panic(rec)
+		}
+	}()
 
 	h.proxy.ServeHTTP(c.Writer, c.Request)
 }
@@ -248,6 +263,24 @@ func isTimeoutError(err error) bool {
 		return true
 	}
 	return strings.Contains(strings.ToLower(err.Error()), "context deadline exceeded")
+}
+
+func isClientDisconnectPanic(rec any) bool {
+	if rec == http.ErrAbortHandler {
+		return true
+	}
+
+	err, ok := rec.(error)
+	if !ok {
+		return false
+	}
+
+	if errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) {
+		return true
+	}
+
+	errMsg := strings.ToLower(err.Error())
+	return strings.Contains(errMsg, "broken pipe") || strings.Contains(errMsg, "connection reset by peer")
 }
 
 func singleJoiningSlash(a, b string) string {

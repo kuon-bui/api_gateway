@@ -1,10 +1,12 @@
 package proxy
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -177,6 +179,29 @@ func TestServeHTTPTrimPathDisabled(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for upstream request")
+	}
+}
+
+func TestIsClientDisconnectPanic(t *testing.T) {
+	tests := []struct {
+		name string
+		rec  any
+		want bool
+	}{
+		{name: "http abort handler", rec: http.ErrAbortHandler, want: true},
+		{name: "broken pipe text", rec: errors.New("write tcp 127.0.0.1: broken pipe"), want: true},
+		{name: "connection reset text", rec: errors.New("read tcp 127.0.0.1: connection reset by peer"), want: true},
+		{name: "syscall epipe", rec: syscall.EPIPE, want: true},
+		{name: "regular error", rec: errors.New("some other error"), want: false},
+		{name: "non error panic", rec: "panic string", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isClientDisconnectPanic(tt.rec); got != tt.want {
+				t.Fatalf("isClientDisconnectPanic() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
