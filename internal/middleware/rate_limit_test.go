@@ -32,13 +32,13 @@ func TestRateLimitRouteOverrideEnabledWhenGlobalDisabled(t *testing.T) {
 	defer gateway.Close()
 
 	first := doRequest(t, gateway.URL, "/users/me", "client-a")
-	defer first.Body.Close()
+	defer func() { _ = first.Body.Close() }()
 	if first.StatusCode != http.StatusNoContent {
 		t.Fatalf("expected first request status 204, got %d", first.StatusCode)
 	}
 
 	second := doRequest(t, gateway.URL, "/users/me", "client-a")
-	defer second.Body.Close()
+	defer func() { _ = second.Body.Close() }()
 	if second.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("expected second request status 429, got %d", second.StatusCode)
 	}
@@ -63,13 +63,13 @@ func TestRateLimitRouteOverrideDisabledSkipsGlobalLimit(t *testing.T) {
 	defer gateway.Close()
 
 	first := doRequest(t, gateway.URL, "/users/me", "client-a")
-	defer first.Body.Close()
+	defer func() { _ = first.Body.Close() }()
 	if first.StatusCode != http.StatusNoContent {
 		t.Fatalf("expected first request status 204, got %d", first.StatusCode)
 	}
 
 	second := doRequest(t, gateway.URL, "/users/me", "client-a")
-	defer second.Body.Close()
+	defer func() { _ = second.Body.Close() }()
 	if second.StatusCode != http.StatusNoContent {
 		t.Fatalf("expected second request status 204, got %d", second.StatusCode)
 	}
@@ -91,13 +91,13 @@ func TestRateLimitUsesGlobalLimitWhenRouteHasNoOverride(t *testing.T) {
 	defer gateway.Close()
 
 	first := doRequest(t, gateway.URL, "/users/me", "client-a")
-	defer first.Body.Close()
+	defer func() { _ = first.Body.Close() }()
 	if first.StatusCode != http.StatusNoContent {
 		t.Fatalf("expected first request status 204, got %d", first.StatusCode)
 	}
 
 	second := doRequest(t, gateway.URL, "/users/me", "client-a")
-	defer second.Body.Close()
+	defer func() { _ = second.Body.Close() }()
 	if second.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("expected second request status 429, got %d", second.StatusCode)
 	}

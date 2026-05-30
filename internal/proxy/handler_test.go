@@ -54,7 +54,7 @@ func TestServeHTTPSupportsSSEStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	bodyBytes, err := io.ReadAll(res.Body)
 	if err != nil {
 		t.Fatalf("failed to read response body: %v", err)
@@ -91,7 +91,7 @@ func TestServeHTTPNoLongerTimesOut(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	bodyBytes, err := io.ReadAll(res.Body)
 	if err != nil {
 		t.Fatalf("failed to read response body: %v", err)
@@ -128,7 +128,7 @@ func TestServeHTTPTrimPathEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	if res.StatusCode != http.StatusNoContent {
 		t.Fatalf("expected status 204, got %d", res.StatusCode)
@@ -166,7 +166,7 @@ func TestServeHTTPTrimPathDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	if res.StatusCode != http.StatusNoContent {
 		t.Fatalf("expected status 204, got %d", res.StatusCode)
@@ -226,7 +226,7 @@ func TestServeHTTPFiltersForwardHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	if res.StatusCode != http.StatusNoContent {
 		t.Fatalf("expected status 204, got %d", res.StatusCode)
