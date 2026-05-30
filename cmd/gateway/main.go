@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"api-gateway/internal/config"
+	"api-gateway/internal/telemetry"
 	"api-gateway/internal/transport"
 
 	"github.com/sirupsen/logrus"
@@ -19,14 +20,40 @@ import (
 func main() {
 	logger := initLogger()
 
-	cfg, err := config.Load("")
+	configPath := os.Getenv("GATEWAY_CONFIG")
+	cfg, resolvedConfigPath, err := config.LoadWithPath(configPath)
 	if err != nil {
 		logger.WithError(err).Fatal("failed to load config")
 	}
 
-	srv, err := transport.NewServer(cfg, logger)
+	shutdownTracing, err := telemetry.Init(context.Background(), cfg.Telemetry)
+	if err != nil {
+		logger.WithError(err).Fatal("failed to initialize telemetry")
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTracing(ctx); err != nil {
+			logger.WithError(err).Warn("failed to shutdown telemetry")
+		}
+	}()
+
+	srv, resolver, err := transport.NewServer(cfg, logger)
 	if err != nil {
 		logger.WithError(err).Fatal("failed to build server")
+	}
+
+	stopWatch, err := config.Watch(resolvedConfigPath, func(next config.Config) {
+		if err := resolver.Reload(next); err != nil {
+			logger.WithError(err).Warn("config reload failed")
+			return
+		}
+		logger.WithField("routes", len(next.Routes)).Info("config reloaded")
+	})
+	if err != nil {
+		logger.WithError(err).Warn("failed to start config watcher")
+	} else {
+		defer stopWatch()
 	}
 
 	mode := "debug"
@@ -37,8 +64,14 @@ func main() {
 
 	go func() {
 		logger.WithField("addr", srv.Addr).Info("gateway starting")
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.WithError(err).Fatal("server failed")
+		var serveErr error
+		if cfg.Server.TLS.Enabled {
+			serveErr = srv.ListenAndServeTLS(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile)
+		} else {
+			serveErr = srv.ListenAndServe()
+		}
+		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			logger.WithError(serveErr).Fatal("server failed")
 		}
 	}()
 

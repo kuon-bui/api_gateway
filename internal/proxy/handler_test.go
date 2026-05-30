@@ -182,6 +182,75 @@ func TestServeHTTPTrimPathDisabled(t *testing.T) {
 	}
 }
 
+func TestServeHTTPFiltersForwardHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	headersCh := make(chan http.Header, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headersCh <- r.Header.Clone()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	resolver, err := app.NewResolver(config.Config{
+		Routes: []config.RouteConfig{{
+			Name:           "events",
+			Methods:        []string{"GET"},
+			PathPrefix:     "/events",
+			Upstream:       upstream.URL,
+			ForwardHeaders: []string{"X-Correlation-ID"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("failed to build resolver: %v", err)
+	}
+
+	h := NewHandler(resolver, 40*time.Millisecond)
+	engine := gin.New()
+	engine.NoRoute(func(c *gin.Context) {
+		h.ServeHTTP(c)
+	})
+	gateway := httptest.NewServer(engine)
+	defer gateway.Close()
+
+	req, err := http.NewRequest(http.MethodGet, gateway.URL+"/events/filter", nil)
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+	req.Header.Set("X-Correlation-ID", "corr-123")
+	req.Header.Set("X-Other", "drop-me")
+	req.Header.Set("Authorization", "Bearer token")
+	req.Header.Set("Cookie", "session=abc")
+
+	res, err := gateway.Client().Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected status 204, got %d", res.StatusCode)
+	}
+
+	select {
+	case headers := <-headersCh:
+		if got := headers.Get("X-Correlation-ID"); got != "corr-123" {
+			t.Fatalf("expected X-Correlation-ID to be forwarded, got %q", got)
+		}
+		if got := headers.Get("X-Other"); got != "" {
+			t.Fatalf("expected X-Other to be stripped, got %q", got)
+		}
+		if got := headers.Get("Authorization"); got != "" {
+			t.Fatalf("expected Authorization to be stripped, got %q", got)
+		}
+		if got := headers.Get("Cookie"); got != "" {
+			t.Fatalf("expected Cookie to be stripped, got %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for upstream request")
+	}
+}
+
 func TestIsClientDisconnectPanic(t *testing.T) {
 	tests := []struct {
 		name string

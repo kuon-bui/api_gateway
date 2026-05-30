@@ -3,22 +3,41 @@ server:
   read_timeout_ms: 5000
   write_timeout_ms: 0
   idle_timeout_ms: 60000
+  tls:
+    enabled: false
+    cert_file: ""
+    key_file: ""
 
 proxy:
   timeout_ms: 0
+
+telemetry:
+  enabled: false
+  service_name: "api-gateway"
+  otlp_endpoint: "localhost:4317"
+  insecure: true
 
 security:
   jwt:
     enabled: true
     issuer: "https://issuer.example.com"
     audience: "gateway-clients"
-    hmac_secret: "change-me-in-prod"
+    hmac_secret: ""
+
+admin:
+  enabled: false
+  api_key: ""
 
 rate_limit:
   enabled: true
   rps: 20
   burst: 40
   by_api_key_header: "X-API-Key"
+  backend: "memory"
+  redis_address: "localhost:6379"
+  redis_password: ""
+  redis_db: 0
+  redis_key_prefix: "gateway:rl"
 
 routes:
   - name: users
@@ -26,6 +45,7 @@ routes:
     path_prefix: "/users"
     upstream: "http://localhost:9001"
     trim_path: true
+    forward_headers: ["X-Request-ID", "X-Correlation-ID"]
     rate_limit:
       enabled: true
       rps: 20

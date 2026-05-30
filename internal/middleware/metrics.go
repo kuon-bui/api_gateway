@@ -15,7 +15,7 @@ var (
 			Name: "gateway_http_requests_total",
 			Help: "Total number of HTTP requests handled by the gateway.",
 		},
-		[]string{"method", "path", "status"},
+		[]string{"method", "route", "status"},
 	)
 
 	requestDuration = promauto.NewHistogramVec(
@@ -24,7 +24,7 @@ var (
 			Help:    "HTTP request latency in seconds.",
 			Buckets: prometheus.DefBuckets,
 		},
-		[]string{"method", "path", "status"},
+		[]string{"method", "route", "status"},
 	)
 )
 
@@ -35,12 +35,30 @@ func PrometheusMetrics() gin.HandlerFunc {
 
 		status := strconv.Itoa(c.Writer.Status())
 		method := c.Request.Method
-		path := c.FullPath()
-		if path == "" {
-			path = c.Request.URL.Path
-		}
+		route := metricRouteLabel(c)
 
-		requestTotal.WithLabelValues(method, path, status).Inc()
-		requestDuration.WithLabelValues(method, path, status).Observe(time.Since(start).Seconds())
+		requestTotal.WithLabelValues(method, route, status).Inc()
+		requestDuration.WithLabelValues(method, route, status).Observe(time.Since(start).Seconds())
 	}
+}
+
+func metricRouteLabel(c *gin.Context) string {
+	routeName, _ := c.Get("route_name")
+	return resolveMetricRouteLabel(routeName, c.FullPath(), c.Request.URL.Path)
+}
+
+func resolveMetricRouteLabel(routeName any, fullPath, requestPath string) string {
+	if route, ok := routeName.(string); ok && route != "" {
+		return route
+	}
+
+	if fullPath != "" {
+		return fullPath
+	}
+
+	if requestPath == "/healthz" || requestPath == "/readyz" || requestPath == "/metrics" {
+		return requestPath
+	}
+
+	return "unmatched"
 }

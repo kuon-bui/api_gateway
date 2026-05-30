@@ -3,6 +3,7 @@ package transport
 import (
 	"fmt"
 	"net/http"
+	"sort"
 
 	"api-gateway/internal/app"
 	"api-gateway/internal/config"
@@ -15,15 +16,18 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-func NewServer(cfg config.Config, logger *logrus.Logger) (*http.Server, error) {
+func NewServer(cfg config.Config, logger *logrus.Logger) (*http.Server, *app.Resolver, error) {
 	resolver, err := app.NewResolver(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("build route resolver: %w", err)
+		return nil, nil, fmt.Errorf("build route resolver: %w", err)
 	}
 
 	// gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
 	engine.Use(gin.Recovery())
+	if cfg.Telemetry.Enabled {
+		engine.Use(middleware.Tracing(cfg.Telemetry.ServiceName))
+	}
 
 	engine.Use(middleware.RequestID())
 	engine.Use(middleware.PrometheusMetrics())
@@ -35,9 +39,19 @@ func NewServer(cfg config.Config, logger *logrus.Logger) (*http.Server, error) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 	engine.GET("/readyz", func(c *gin.Context) {
+		if err := checkUpstreamReadiness(resolver.Snapshot(), cfg.ProxyTimeout()); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"status": "not_ready",
+				"reason": err.Error(),
+			})
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{"status": "ready"})
 	})
 	engine.GET("/metrics", gin.WrapH(promhttp.Handler()))
+	if cfg.Admin.Enabled {
+		registerAdminRoutes(engine, cfg.Admin, resolver)
+	}
 
 	proxyHandler := proxy.NewHandler(resolver, cfg.ProxyTimeout())
 
@@ -56,9 +70,43 @@ func NewServer(cfg config.Config, logger *logrus.Logger) (*http.Server, error) {
 		WriteTimeout: cfg.WriteTimeout(),
 		IdleTimeout:  cfg.IdleTimeout(),
 	}
-	return srv, nil
+	return srv, resolver, nil
 }
 
 func WriteInternalError(c *gin.Context) {
 	domain.WriteError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Internal server error")
+}
+
+func registerAdminRoutes(engine *gin.Engine, adminCfg config.AdminConfig, resolver *app.Resolver) {
+	admin := engine.Group("/admin")
+	admin.Use(func(c *gin.Context) {
+		if c.GetHeader("X-Admin-Key") != adminCfg.APIKey {
+			domain.WriteError(c, http.StatusUnauthorized, "ADMIN_UNAUTHORIZED", "Admin access denied")
+			c.Abort()
+			return
+		}
+		c.Next()
+	})
+
+	admin.GET("/routes", func(c *gin.Context) {
+		routes := resolver.Snapshot()
+		payload := make([]gin.H, 0, len(routes))
+		for _, route := range routes {
+			methods := make([]string, 0, len(route.Methods))
+			for method := range route.Methods {
+				methods = append(methods, method)
+			}
+			sort.Strings(methods)
+
+			payload = append(payload, gin.H{
+				"name":        route.Name,
+				"methods":     methods,
+				"path_prefix": route.PathPrefix,
+				"upstream":    route.Upstream.String(),
+				"trim_path":   route.TrimPath,
+			})
+		}
+
+		c.JSON(http.StatusOK, gin.H{"routes": payload})
+	})
 }

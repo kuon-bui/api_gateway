@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/viper"
 )
 
@@ -25,6 +26,14 @@ const (
 //	GATEWAY_SECURITY_JWT_HMAC_SECRET=x  overrides security.jwt.hmac_secret
 //	GATEWAY_CONFIG=/etc/gw/custom.yaml  points to an alternate config file
 func Load(path string) (Config, error) {
+	cfg, _, err := LoadWithPath(path)
+	if err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+func LoadWithPath(path string) (Config, string, error) {
 	v := viper.New()
 
 	if path != "" {
@@ -42,17 +51,44 @@ func Load(path string) (Config, error) {
 	v.AutomaticEnv()
 
 	if err := v.ReadInConfig(); err != nil {
-		return Config{}, fmt.Errorf("read config: %w", err)
+		return Config{}, "", fmt.Errorf("read config: %w", err)
 	}
 
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
-		return Config{}, fmt.Errorf("unmarshal config: %w", err)
+		return Config{}, "", fmt.Errorf("unmarshal config: %w", err)
 	}
 
 	if err := cfg.Validate(); err != nil {
-		return Config{}, fmt.Errorf("validate config: %w", err)
+		return Config{}, "", fmt.Errorf("validate config: %w", err)
 	}
 
-	return cfg, nil
+	return cfg, v.ConfigFileUsed(), nil
+}
+
+func Watch(path string, onChange func(Config)) (func(), error) {
+	v := viper.New()
+	v.SetConfigFile(path)
+	v.SetConfigType("yaml")
+	v.SetEnvPrefix(envPrefix)
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
+	v.AutomaticEnv()
+
+	if err := v.ReadInConfig(); err != nil {
+		return nil, fmt.Errorf("read config for watch: %w", err)
+	}
+
+	v.OnConfigChange(func(_ fsnotify.Event) {
+		var cfg Config
+		if err := v.Unmarshal(&cfg); err != nil {
+			return
+		}
+		if err := cfg.Validate(); err != nil {
+			return
+		}
+		onChange(cfg)
+	})
+	v.WatchConfig()
+
+	return func() {}, nil
 }

@@ -10,8 +10,10 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/textproto"
 	"net/url"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	"api-gateway/internal/domain"
 
 	"github.com/gin-gonic/gin"
+	"github.com/sony/gobreaker"
 )
 
 type contextKey string
@@ -26,28 +29,50 @@ type contextKey string
 const routeKey contextKey = "proxy_route"
 
 type routeInfo struct {
-	upstream   *url.URL
-	pathPrefix string
-	name       string
-	trimPath   bool
+	upstream       *url.URL
+	pathPrefix     string
+	name           string
+	trimPath       bool
+	forwardHeaders map[string]struct{}
+	circuitBreaker *domain.RouteCircuitBreaker
+	retry          *domain.RouteRetry
+}
+
+var blockedForwardHeaders = map[string]struct{}{
+	"Authorization": {},
+	"Cookie":        {},
+	"Set-Cookie":    {},
 }
 
 // Handler forwards matched requests to upstream services via httputil.ReverseProxy.
 // WebSocket upgrade requests are tunnelled over a raw TCP connection.
 type Handler struct {
-	resolver *app.Resolver
-	proxy    *httputil.ReverseProxy
+	resolver   *app.Resolver
+	proxy      *httputil.ReverseProxy
+	transport  http.RoundTripper
+	breakersMu sync.Mutex
+	breakers   map[string]*gobreaker.CircuitBreaker
 }
 
 func NewHandler(resolver *app.Resolver, timeout time.Duration) *Handler {
-	h := &Handler{resolver: resolver}
+	h := &Handler{
+		resolver:  resolver,
+		transport: newTransport(timeout),
+		breakers:  make(map[string]*gobreaker.CircuitBreaker),
+	}
 	h.proxy = &httputil.ReverseProxy{
 		Director:      h.director,
-		Transport:     newTransport(timeout),
+		Transport:     roundTripperFunc(h.roundTrip),
 		FlushInterval: -1,
 		ErrorHandler:  h.errorHandler,
 	}
 	return h
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 // newTransport returns an http.Transport tuned for a gateway proxy workload.
@@ -73,10 +98,13 @@ func (h *Handler) ServeHTTP(c *gin.Context) {
 	}
 
 	info := routeInfo{
-		upstream:   route.Upstream,
-		pathPrefix: route.PathPrefix,
-		name:       route.Name,
-		trimPath:   route.TrimPath,
+		upstream:       route.Upstream,
+		pathPrefix:     route.PathPrefix,
+		name:           route.Name,
+		trimPath:       route.TrimPath,
+		forwardHeaders: route.ForwardHeaders,
+		circuitBreaker: route.CircuitBreaker,
+		retry:          route.Retry,
 	}
 
 	// Store route metadata for access logging.
@@ -115,6 +143,147 @@ func (h *Handler) ServeHTTP(c *gin.Context) {
 	h.proxy.ServeHTTP(c.Writer, c.Request)
 }
 
+func (h *Handler) roundTrip(req *http.Request) (*http.Response, error) {
+	info, _ := req.Context().Value(routeKey).(routeInfo)
+	maxAttempts := maxRetryAttempts(req, info.retry)
+	backoff := retryBackoff(info.retry)
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		attemptReq, err := cloneRequestForAttempt(req, attempt)
+		if err != nil {
+			return nil, err
+		}
+
+		resp, err := h.roundTripWithCircuit(attemptReq, info)
+		if !shouldRetry(attemptReq.Method, attempt, maxAttempts, resp, err) {
+			return resp, err
+		}
+		lastErr = err
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		if backoff > 0 {
+			time.Sleep(backoff)
+		}
+	}
+
+	return nil, lastErr
+}
+
+func (h *Handler) roundTripWithCircuit(req *http.Request, info routeInfo) (*http.Response, error) {
+	if info.circuitBreaker == nil || !info.circuitBreaker.Enabled {
+		return h.transport.RoundTrip(req)
+	}
+
+	breaker := h.breakerForRoute(info)
+	result, err := breaker.Execute(func() (any, error) {
+		return h.transport.RoundTrip(req)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	resp, ok := result.(*http.Response)
+	if !ok {
+		return nil, errors.New("unexpected transport response type")
+	}
+	return resp, nil
+}
+
+func (h *Handler) breakerForRoute(info routeInfo) *gobreaker.CircuitBreaker {
+	h.breakersMu.Lock()
+	defer h.breakersMu.Unlock()
+
+	if cb, ok := h.breakers[info.name]; ok {
+		return cb
+	}
+
+	settings := gobreaker.Settings{
+		Name:        info.name,
+		MaxRequests: info.circuitBreaker.HalfOpenMaxRequests,
+		Interval:    0,
+		Timeout:     time.Duration(info.circuitBreaker.OpenTimeout) * time.Millisecond,
+		ReadyToTrip: func(counts gobreaker.Counts) bool {
+			return counts.ConsecutiveFailures >= info.circuitBreaker.FailureThreshold
+		},
+	}
+
+	cb := gobreaker.NewCircuitBreaker(settings)
+	h.breakers[info.name] = cb
+	return cb
+}
+
+func maxRetryAttempts(req *http.Request, cfg *domain.RouteRetry) int {
+	if cfg == nil || !cfg.Enabled {
+		return 1
+	}
+	if !isIdempotentMethod(req.Method) {
+		return 1
+	}
+	if req.Body != nil && req.GetBody == nil {
+		return 1
+	}
+	if cfg.MaxAttempts < 1 {
+		return 1
+	}
+	return cfg.MaxAttempts
+}
+
+func retryBackoff(cfg *domain.RouteRetry) time.Duration {
+	if cfg == nil || cfg.BackoffMS <= 0 {
+		return 0
+	}
+	return time.Duration(cfg.BackoffMS) * time.Millisecond
+}
+
+func cloneRequestForAttempt(req *http.Request, attempt int) (*http.Request, error) {
+	if attempt == 1 {
+		return req, nil
+	}
+
+	clone := req.Clone(req.Context())
+	if req.Body != nil {
+		if req.GetBody == nil {
+			return nil, errors.New("request body is not replayable for retry")
+		}
+		body, err := req.GetBody()
+		if err != nil {
+			return nil, err
+		}
+		clone.Body = body
+	}
+
+	return clone, nil
+}
+
+func shouldRetry(method string, attempt, maxAttempts int, resp *http.Response, err error) bool {
+	if attempt >= maxAttempts || !isIdempotentMethod(method) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	if resp == nil {
+		return false
+	}
+	switch resp.StatusCode {
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func isIdempotentMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace, http.MethodPut, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
 // director rewrites the outbound request URL to the matched upstream target.
 // httputil.ReverseProxy calls this before forwarding the request.
 func (h *Handler) director(req *http.Request) {
@@ -126,10 +295,35 @@ func (h *Handler) director(req *http.Request) {
 	req.URL.Scheme = target.Scheme
 	req.URL.Host = target.Host
 	req.URL.Path = upstreamRequestPath(req.URL.Path, info)
+	filterForwardHeaders(req, info.forwardHeaders)
 	// Preserve the Host header as the upstream host.
 	req.Host = target.Host
 	// X-Forwarded-For is appended automatically by httputil.ReverseProxy
 	// using req.RemoteAddr after Director returns; no manual handling needed.
+}
+
+func filterForwardHeaders(req *http.Request, allow map[string]struct{}) {
+	if len(allow) == 0 {
+		for header := range blockedForwardHeaders {
+			req.Header.Del(header)
+		}
+		return
+	}
+
+	filtered := make(http.Header, len(allow))
+	for k, vv := range req.Header {
+		canonical := textproto.CanonicalMIMEHeaderKey(k)
+		if _, blocked := blockedForwardHeaders[canonical]; blocked {
+			continue
+		}
+		if _, ok := allow[canonical]; !ok {
+			continue
+		}
+		for _, v := range vv {
+			filtered.Add(canonical, v)
+		}
+	}
+	req.Header = filtered
 }
 
 // errorHandler translates upstream transport errors into gateway error responses

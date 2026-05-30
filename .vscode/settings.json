@@ -1,11 +1,15 @@
 {
   "cSpell.words": [
+    "fsnotify",
     "gonic",
     "healthz",
     "mapstructure",
+    "otlptrace",
+    "otlptracegrpc",
     "promhttp",
     "readyz",
     "samber",
+    "semconv",
     "sirupsen",
     "TRCE"
   ]

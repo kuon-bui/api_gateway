@@ -1,7 +1,10 @@
 package middleware
 
 import (
+	"context"
+	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -10,6 +13,7 @@ import (
 	"api-gateway/internal/domain"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/time/rate"
 )
 
@@ -23,6 +27,157 @@ type limiterStore struct {
 	clients map[string]*clientLimiter
 	rps     rate.Limit
 	burst   int
+}
+
+type rateLimiterBackend interface {
+	Allow(c *gin.Context, scope, key string, rps, burst int) (bool, error)
+}
+
+type memoryRateLimiterBackend struct {
+	mu     sync.Mutex
+	stores map[string]*limiterStore
+}
+
+func newMemoryRateLimiterBackend() *memoryRateLimiterBackend {
+	return &memoryRateLimiterBackend{stores: make(map[string]*limiterStore)}
+}
+
+func (b *memoryRateLimiterBackend) Allow(_ *gin.Context, scope, key string, rps, burst int) (bool, error) {
+	store := b.storeForScope(scope, rps, burst)
+	return store.get(key).Allow(), nil
+}
+
+func (b *memoryRateLimiterBackend) storeForScope(scope string, rps, burst int) *limiterStore {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if store, ok := b.stores[scope]; ok {
+		return store
+	}
+
+	store := newLimiterStore(rps, burst)
+	b.stores[scope] = store
+	go store.gc(10 * time.Minute)
+	return store
+}
+
+type redisRateLimiterBackend struct {
+	client    *redis.Client
+	keyPrefix string
+	now       func() time.Time
+}
+
+var redisTokenBucketScript = redis.NewScript(`
+local key = KEYS[1]
+local now_ms = tonumber(ARGV[1])
+local refill_rate = tonumber(ARGV[2])
+local burst = tonumber(ARGV[3])
+local requested = tonumber(ARGV[4])
+
+if refill_rate <= 0 or burst <= 0 or requested <= 0 then
+	return {0, 0}
+end
+
+local data = redis.call("HMGET", key, "tokens", "ts")
+local tokens = tonumber(data[1])
+local ts = tonumber(data[2])
+
+if tokens == nil then
+	tokens = burst
+end
+if ts == nil then
+	ts = now_ms
+end
+
+local delta_ms = now_ms - ts
+if delta_ms < 0 then
+	delta_ms = 0
+end
+
+tokens = math.min(burst, tokens + (delta_ms / 1000.0) * refill_rate)
+
+local allowed = 0
+if tokens >= requested then
+	allowed = 1
+	tokens = tokens - requested
+end
+
+redis.call("HMSET", key, "tokens", tokens, "ts", now_ms)
+
+local ttl_ms = math.ceil((burst / refill_rate) * 1000) + 1000
+if ttl_ms < 1000 then
+	ttl_ms = 1000
+end
+redis.call("PEXPIRE", key, ttl_ms)
+
+return {allowed, tokens}
+`)
+
+func newRedisRateLimiterBackend(cfg config.RateLimitConfig) *redisRateLimiterBackend {
+	prefix := strings.TrimSpace(cfg.RedisKeyPrefix)
+	if prefix == "" {
+		prefix = "gateway:rl"
+	}
+
+	client := redis.NewClient(&redis.Options{
+		Addr:     cfg.RedisAddress,
+		Password: cfg.RedisPassword,
+		DB:       cfg.RedisDB,
+	})
+
+	return &redisRateLimiterBackend{
+		client:    client,
+		keyPrefix: prefix,
+		now:       time.Now,
+	}
+}
+
+func (b *redisRateLimiterBackend) Allow(c *gin.Context, scope, key string, rps, burst int) (bool, error) {
+	if rps <= 0 || burst <= 0 {
+		return true, nil
+	}
+
+	ctx := c.Request.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	redisKey := fmt.Sprintf("%s:%s:%s", b.keyPrefix, scope, key)
+	nowMs := b.now().UnixMilli()
+
+	result, err := redisTokenBucketScript.Run(
+		ctx,
+		b.client,
+		[]string{redisKey},
+		nowMs,
+		rps,
+		burst,
+		1,
+	).Result()
+	if err != nil {
+		return false, err
+	}
+
+	allowed, err := parseAllowedResult(result)
+	if err != nil {
+		return false, err
+	}
+
+	return allowed, nil
+}
+
+func parseAllowedResult(result any) (bool, error) {
+	values, ok := result.([]any)
+	if !ok || len(values) == 0 {
+		return false, fmt.Errorf("unexpected redis limiter result: %T", result)
+	}
+
+	allowedRaw, ok := values[0].(int64)
+	if !ok {
+		return false, fmt.Errorf("unexpected redis limiter allowed type: %T", values[0])
+	}
+
+	return allowedRaw == 1, nil
 }
 
 func newLimiterStore(rps, burst int) *limiterStore {
@@ -67,37 +222,22 @@ func RateLimit(globalCfg config.RateLimitConfig, resolver *app.Resolver) gin.Han
 		headerName = "X-API-Key"
 	}
 
-	var globalStore *limiterStore
-	if globalCfg.Enabled {
-		globalStore = newLimiterStore(globalCfg.RPS, globalCfg.Burst)
-		go globalStore.gc(10 * time.Minute)
-	}
-
-	routeStores := make(map[string]*limiterStore)
-	var routeStoresMu sync.Mutex
-	getRouteStore := func(route domain.Route) *limiterStore {
-		if route.RateLimit == nil || !route.RateLimit.Enabled {
-			return nil
-		}
-
-		routeStoresMu.Lock()
-		defer routeStoresMu.Unlock()
-
-		store, ok := routeStores[route.Name]
-		if ok {
-			return store
-		}
-
-		store = newLimiterStore(route.RateLimit.RPS, route.RateLimit.Burst)
-		routeStores[route.Name] = store
-		go store.gc(10 * time.Minute)
-		return store
-	}
-
-	if globalStore == nil && resolver == nil {
+	if !globalCfg.Enabled && resolver == nil {
 		return func(c *gin.Context) {
 			c.Next()
 		}
+	}
+
+	backendName := strings.ToLower(strings.TrimSpace(globalCfg.Backend))
+	if backendName == "" {
+		backendName = "memory"
+	}
+
+	var backend rateLimiterBackend
+	if backendName == "redis" {
+		backend = newRedisRateLimiterBackend(globalCfg)
+	} else {
+		backend = newMemoryRateLimiterBackend()
 	}
 
 	return func(c *gin.Context) {
@@ -106,7 +246,11 @@ func RateLimit(globalCfg config.RateLimitConfig, resolver *app.Resolver) gin.Han
 			key = c.ClientIP()
 		}
 
-		var limiter *rate.Limiter
+		enabled := globalCfg.Enabled
+		rps := globalCfg.RPS
+		burst := globalCfg.Burst
+		scope := "global"
+
 		if resolver != nil {
 			route, ok := resolver.Match(c.Request.Method, c.Request.URL.Path)
 			if ok && route.RateLimit != nil {
@@ -114,21 +258,25 @@ func RateLimit(globalCfg config.RateLimitConfig, resolver *app.Resolver) gin.Han
 					c.Next()
 					return
 				}
-				if store := getRouteStore(route); store != nil {
-					limiter = store.get(key)
-				}
+				enabled = true
+				rps = route.RateLimit.RPS
+				burst = route.RateLimit.Burst
+				scope = "route:" + route.Name
 			}
 		}
 
-		if limiter == nil {
-			if globalStore == nil {
-				c.Next()
-				return
-			}
-			limiter = globalStore.get(key)
+		if !enabled {
+			c.Next()
+			return
 		}
 
-		if !limiter.Allow() {
+		allowed, err := backend.Allow(c, scope, key, rps, burst)
+		if err != nil {
+			domain.WriteError(c, http.StatusServiceUnavailable, "RATE_LIMIT_BACKEND_ERROR", "Rate limit backend unavailable")
+			c.Abort()
+			return
+		}
+		if !allowed {
 			domain.WriteError(c, http.StatusTooManyRequests, "RATE_LIMIT_EXCEEDED", "Too many requests")
 			c.Abort()
 			return
