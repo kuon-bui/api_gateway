@@ -1,3 +1,5 @@
+version: "2"
+
 run:
   timeout: 3m
 
@@ -5,20 +7,22 @@ linters:
   enable:
     - errcheck
     - gocritic
-    - gofmt
-    - goimports
     - gosimple
     - govet
     - ineffassign
     - revive
     - staticcheck
     - unused
+  settings:
+    revive:
+      rules:
+        - name: package-comments
+          disabled: true
 
-linters-settings:
-  revive:
-    rules:
-      - name: package-comments
-        disabled: true
+formatters:
+  enable:
+    - gofmt
+    - goimports
 
 issues:
   exclude-use-default: false
