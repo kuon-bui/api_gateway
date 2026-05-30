@@ -15,7 +15,6 @@ Use `golangci-lint` in strict mode with at least:
 - `errcheck`
 - `ineffassign`
 - `unused`
-- `gosimple`
 - `gocritic`
 - `revive`
 
