@@ -40,6 +40,7 @@ rate_limit:
   redis_key_prefix: "gateway:rl"
 
 routes:
+  # Single upstream (backward compatible).
   - name: users
     methods: ["GET", "POST"]
     path_prefix: "/users"
@@ -50,3 +51,24 @@ routes:
       enabled: true
       rps: 20
       burst: 40
+
+  # Multiple upstreams with weighted load balancing and passive health checks.
+  - name: orders
+    methods: ["GET", "POST"]
+    path_prefix: "/orders"
+    trim_path: true
+    load_balancing: "weighted"   # round_robin (default) | weighted | random
+    upstreams:
+      - url: "http://localhost:9101"
+        weight: 3
+      - url: "http://localhost:9102"
+        weight: 1
+    health_check:
+      passive:
+        enabled: true
+        failure_threshold: 3   # eject after N consecutive failures
+        cooldown_ms: 10000     # re-probe (half-open) after this window
+    retry:
+      enabled: true
+      max_attempts: 2          # retries fail over to another upstream
+      backoff_ms: 100

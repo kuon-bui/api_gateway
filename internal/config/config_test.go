@@ -267,6 +267,81 @@ func TestValidateFailsAdminEnabledWithoutAPIKey(t *testing.T) {
 	}
 }
 
+func baseRoute() RouteConfig {
+	return RouteConfig{Name: "events", Methods: []string{"GET"}, PathPrefix: "/events"}
+}
+
+func cfgWith(rt RouteConfig) Config {
+	return Config{
+		Server: ServerConfig{Port: 8080, ReadTimeoutMS: 1, WriteTimeoutMS: 1, IdleTimeoutMS: 1},
+		Proxy:  ProxyConfig{TimeoutMS: 1},
+		Routes: []RouteConfig{rt},
+	}
+}
+
+func TestValidateAllowsUpstreamPool(t *testing.T) {
+	rt := baseRoute()
+	rt.LoadBalancing = "weighted"
+	rt.Upstreams = []UpstreamConfig{
+		{URL: "http://a:9001", Weight: 3},
+		{URL: "http://b:9001", Weight: 1},
+	}
+	if err := cfgWith(rt).Validate(); err != nil {
+		t.Fatalf("expected valid upstream pool, got error: %v", err)
+	}
+}
+
+func TestValidateFailsWhenNoUpstream(t *testing.T) {
+	rt := baseRoute()
+	if err := cfgWith(rt).Validate(); err == nil {
+		t.Fatal("expected validation error when neither upstream nor upstreams is set")
+	}
+}
+
+func TestValidateFailsWhenBothUpstreamForms(t *testing.T) {
+	rt := baseRoute()
+	rt.Upstream = "http://a:9001"
+	rt.Upstreams = []UpstreamConfig{{URL: "http://b:9001", Weight: 1}}
+	if err := cfgWith(rt).Validate(); err == nil {
+		t.Fatal("expected validation error when both upstream and upstreams are set")
+	}
+}
+
+func TestValidateFailsWeightedWithoutPositiveWeight(t *testing.T) {
+	rt := baseRoute()
+	rt.LoadBalancing = "weighted"
+	rt.Upstreams = []UpstreamConfig{{URL: "http://a:9001", Weight: 0}}
+	if err := cfgWith(rt).Validate(); err == nil {
+		t.Fatal("expected validation error for non-positive weight under weighted strategy")
+	}
+}
+
+func TestValidateFailsInvalidLoadBalancing(t *testing.T) {
+	rt := baseRoute()
+	rt.Upstream = "http://a:9001"
+	rt.LoadBalancing = "least_conn"
+	if err := cfgWith(rt).Validate(); err == nil {
+		t.Fatal("expected validation error for unknown load_balancing strategy")
+	}
+}
+
+func TestValidateFailsInvalidPoolUpstreamURL(t *testing.T) {
+	rt := baseRoute()
+	rt.Upstreams = []UpstreamConfig{{URL: "://broken", Weight: 1}}
+	if err := cfgWith(rt).Validate(); err == nil {
+		t.Fatal("expected validation error for invalid pool upstream url")
+	}
+}
+
+func TestValidateFailsPassiveHealthMissingValues(t *testing.T) {
+	rt := baseRoute()
+	rt.Upstream = "http://a:9001"
+	rt.HealthCheck = &RouteHealthCheckConfig{Passive: PassiveHealthConfig{Enabled: true, FailureThreshold: 0, CooldownMS: 1000}}
+	if err := cfgWith(rt).Validate(); err == nil {
+		t.Fatal("expected validation error when passive failure_threshold is zero")
+	}
+}
+
 func TestValidateFailsRedisBackendWithoutAddress(t *testing.T) {
 	cfg := Config{
 		Server: ServerConfig{Port: 8080, ReadTimeoutMS: 1, WriteTimeoutMS: 1, IdleTimeoutMS: 1},

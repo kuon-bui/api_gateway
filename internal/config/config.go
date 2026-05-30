@@ -95,16 +95,41 @@ type RouteRetryConfig struct {
 	BackoffMS   int  `yaml:"backoff_ms" mapstructure:"backoff_ms"`
 }
 
+type UpstreamConfig struct {
+	URL    string `yaml:"url"    mapstructure:"url"`
+	Weight int    `yaml:"weight" mapstructure:"weight"`
+}
+
+type PassiveHealthConfig struct {
+	Enabled          bool   `yaml:"enabled"           mapstructure:"enabled"`
+	FailureThreshold uint32 `yaml:"failure_threshold" mapstructure:"failure_threshold"`
+	CooldownMS       int    `yaml:"cooldown_ms"       mapstructure:"cooldown_ms"`
+}
+
+type RouteHealthCheckConfig struct {
+	Passive PassiveHealthConfig `yaml:"passive" mapstructure:"passive"`
+}
+
 type RouteConfig struct {
 	Name           string                     `yaml:"name"        mapstructure:"name"`
 	Methods        []string                   `yaml:"methods"     mapstructure:"methods"`
 	PathPrefix     string                     `yaml:"path_prefix" mapstructure:"path_prefix"`
-	Upstream       string                     `yaml:"upstream"    mapstructure:"upstream"`
+	Upstream       string                     `yaml:"upstream,omitempty"    mapstructure:"upstream"`
+	Upstreams      []UpstreamConfig           `yaml:"upstreams,omitempty"   mapstructure:"upstreams"`
+	LoadBalancing  string                     `yaml:"load_balancing,omitempty" mapstructure:"load_balancing"`
+	HealthCheck    *RouteHealthCheckConfig    `yaml:"health_check,omitempty" mapstructure:"health_check"`
 	TrimPath       bool                       `yaml:"trim_path"   mapstructure:"trim_path"`
 	ForwardHeaders []string                   `yaml:"forward_headers,omitempty" mapstructure:"forward_headers"`
 	CircuitBreaker *RouteCircuitBreakerConfig `yaml:"circuit_breaker,omitempty" mapstructure:"circuit_breaker"`
 	Retry          *RouteRetryConfig          `yaml:"retry,omitempty" mapstructure:"retry"`
 	RateLimit      *RouteRateLimitConfig      `yaml:"rate_limit,omitempty" mapstructure:"rate_limit"`
+}
+
+// validLoadBalancingStrategies enumerates accepted load_balancing values.
+var validLoadBalancingStrategies = map[string]struct{}{
+	"round_robin": {},
+	"weighted":    {},
+	"random":      {},
 }
 
 func (c Config) Validate() error {
@@ -196,8 +221,8 @@ func (c Config) Validate() error {
 				return fmt.Errorf("routes[%d].methods contains invalid method: %s", i, method)
 			}
 		}
-		if _, err := url.ParseRequestURI(rt.Upstream); err != nil {
-			return fmt.Errorf("routes[%d].upstream is invalid: %w", i, err)
+		if err := validateRouteUpstreams(rt, i); err != nil {
+			return err
 		}
 		for _, header := range rt.ForwardHeaders {
 			if strings.TrimSpace(header) == "" {
@@ -247,6 +272,58 @@ func (c Config) IdleTimeout() time.Duration {
 
 func (c Config) ProxyTimeout() time.Duration {
 	return time.Duration(c.Proxy.TimeoutMS) * time.Millisecond
+}
+
+// validateRouteUpstreams enforces the upstream/upstreams/load_balancing/
+// health_check rules for a single route. Exactly one of `upstream` (single) or
+// `upstreams` (pool) must be configured.
+func validateRouteUpstreams(rt RouteConfig, i int) error {
+	hasSingle := strings.TrimSpace(rt.Upstream) != ""
+	hasPool := len(rt.Upstreams) > 0
+
+	switch {
+	case !hasSingle && !hasPool:
+		return fmt.Errorf("routes[%d] must set either upstream or upstreams", i)
+	case hasSingle && hasPool:
+		return fmt.Errorf("routes[%d] must set either upstream or upstreams, not both", i)
+	}
+
+	weighted := strings.EqualFold(strings.TrimSpace(rt.LoadBalancing), "weighted")
+
+	if hasSingle {
+		if _, err := url.ParseRequestURI(rt.Upstream); err != nil {
+			return fmt.Errorf("routes[%d].upstream is invalid: %w", i, err)
+		}
+	} else {
+		for j, up := range rt.Upstreams {
+			if _, err := url.ParseRequestURI(strings.TrimSpace(up.URL)); err != nil {
+				return fmt.Errorf("routes[%d].upstreams[%d].url is invalid: %w", i, j, err)
+			}
+			if up.Weight < 0 {
+				return fmt.Errorf("routes[%d].upstreams[%d].weight must not be negative", i, j)
+			}
+			if weighted && up.Weight <= 0 {
+				return fmt.Errorf("routes[%d].upstreams[%d].weight must be positive when load_balancing is weighted", i, j)
+			}
+		}
+	}
+
+	if lb := strings.TrimSpace(rt.LoadBalancing); lb != "" {
+		if _, ok := validLoadBalancingStrategies[strings.ToLower(lb)]; !ok {
+			return fmt.Errorf("routes[%d].load_balancing must be one of round_robin, weighted, random", i)
+		}
+	}
+
+	if rt.HealthCheck != nil && rt.HealthCheck.Passive.Enabled {
+		if rt.HealthCheck.Passive.FailureThreshold == 0 {
+			return fmt.Errorf("routes[%d].health_check.passive.failure_threshold must be positive", i)
+		}
+		if rt.HealthCheck.Passive.CooldownMS <= 0 {
+			return fmt.Errorf("routes[%d].health_check.passive.cooldown_ms must be positive", i)
+		}
+	}
+
+	return nil
 }
 
 func isHTTPMethod(method string) bool {

@@ -28,6 +28,53 @@ func TestResolverMatchLongestPrefix(t *testing.T) {
 	}
 }
 
+func TestResolverBuildsUpstreamPool(t *testing.T) {
+	cfg := config.Config{
+		Routes: []config.RouteConfig{
+			{
+				Name:          "pool",
+				Methods:       []string{"GET"},
+				PathPrefix:    "/pool",
+				LoadBalancing: "weighted",
+				Upstreams: []config.UpstreamConfig{
+					{URL: "http://a:9001", Weight: 3},
+					{URL: "http://b:9002", Weight: 1},
+				},
+			},
+			{Name: "single", Methods: []string{"GET"}, PathPrefix: "/single", Upstream: "http://c:9003"},
+		},
+	}
+
+	resolver, err := NewResolver(cfg)
+	if err != nil {
+		t.Fatalf("NewResolver returned error: %v", err)
+	}
+
+	pool, ok := resolver.Match("GET", "/pool/x")
+	if !ok {
+		t.Fatal("expected pool route match")
+	}
+	ups := pool.Balancer.Upstreams()
+	if len(ups) != 2 {
+		t.Fatalf("expected 2 upstreams, got %d", len(ups))
+	}
+	if ups[0].Weight != 3 || ups[1].Weight != 1 {
+		t.Fatalf("unexpected weights: %d, %d", ups[0].Weight, ups[1].Weight)
+	}
+
+	single, ok := resolver.Match("GET", "/single/x")
+	if !ok {
+		t.Fatal("expected single route match")
+	}
+	singleUps := single.Balancer.Upstreams()
+	if len(singleUps) != 1 || singleUps[0].URL.String() != "http://c:9003" {
+		t.Fatalf("expected single-element pool from upstream field, got %+v", singleUps)
+	}
+	if singleUps[0].Weight != 1 {
+		t.Fatalf("expected default weight 1 for single upstream, got %d", singleUps[0].Weight)
+	}
+}
+
 func TestResolverCarriesTrimPath(t *testing.T) {
 	cfg := config.Config{
 		Routes: []config.RouteConfig{

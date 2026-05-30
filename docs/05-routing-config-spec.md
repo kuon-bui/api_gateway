@@ -72,17 +72,51 @@ routes:
   - name: orders
     methods: ["GET"]
     path_prefix: "/orders"
-    upstream: "http://order-service:9002"
+    # Multiple upstreams with load balancing + passive health checks.
+    load_balancing: "weighted"   # round_robin (default) | weighted | random
+    upstreams:
+      - url: "http://order-service-a:9002"
+        weight: 3
+      - url: "http://order-service-b:9002"
+        weight: 1
+    health_check:
+      passive:
+        enabled: true
+        failure_threshold: 3
+        cooldown_ms: 10000
     rate_limit:
       enabled: false
 ```
+
+### Upstreams
+
+A route targets backends via **either** of two mutually exclusive fields:
+
+- `upstream` (string) — a single backend URL. Backward compatible.
+- `upstreams` (list) — a pool of `{ url, weight }` entries for load balancing.
+
+`load_balancing` selects the strategy across the pool:
+
+- `round_robin` (default) — cycle through upstreams in order.
+- `weighted` — smooth weighted round-robin honouring each `weight`.
+- `random` — uniformly random healthy upstream.
+
+`health_check.passive` ejects an upstream after `failure_threshold` consecutive
+failures (transport error or `502`/`503`/`504`) and re-admits it (half-open)
+after `cooldown_ms`. When `retry` is enabled, retry attempts fail over to other
+healthy upstreams; WebSocket connections pick a single upstream (no failover).
+When every upstream is ejected, the gateway returns `503 NO_HEALTHY_UPSTREAM`.
 
 ## 3. Validation Rules
 
 - `routes` must not be empty.
 - Route names must be unique.
 - `path_prefix` must start with `/`.
-- `upstream` must be valid HTTP/HTTPS URL.
+- Exactly one of `upstream` (single) or `upstreams` (pool) must be set per route.
+- `upstream` / each `upstreams[*].url` must be a valid HTTP/HTTPS URL.
+- `upstreams[*].weight` must not be negative; when `load_balancing=weighted` it must be positive.
+- `load_balancing`, when set, must be one of `round_robin`, `weighted`, `random`.
+- If `health_check.passive.enabled=true`, `failure_threshold` and `cooldown_ms` must be positive.
 - `methods` must contain valid HTTP methods.
 - `read_timeout_ms`, `idle_timeout_ms`, and rate values must be positive.
 - `write_timeout_ms` must be zero or positive (`0` disables write timeout for long-lived streams like SSE).
@@ -104,7 +138,8 @@ routes:
 
 - Match by HTTP method first.
 - Then match longest `path_prefix`.
-- Retry is applied only for idempotent requests and only on upstream errors / 502 / 503 / 504.
+- Within a matched route, an upstream is chosen per attempt by the `load_balancing` strategy, skipping passively-ejected upstreams.
+- Retry is applied only for idempotent requests and only on upstream errors / 502 / 503 / 504; each retry selects another upstream (failover).
 - Rate limiting precedence: route rate limit override (if configured) takes priority over global `rate_limit`.
 - If no route matches, return `404` gateway route-not-found response.
 

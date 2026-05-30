@@ -7,7 +7,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
+	"api-gateway/internal/balancer"
 	"api-gateway/internal/config"
 	"api-gateway/internal/domain"
 )
@@ -29,9 +31,9 @@ func NewResolver(cfg config.Config) (*Resolver, error) {
 func buildRoutes(cfg config.Config) ([]domain.Route, error) {
 	routes := make([]domain.Route, 0, len(cfg.Routes))
 	for _, rt := range cfg.Routes {
-		upstreamURL, err := url.Parse(rt.Upstream)
+		bal, err := buildBalancer(rt)
 		if err != nil {
-			return nil, fmt.Errorf("parse upstream url for route %q: %w", rt.Name, err)
+			return nil, fmt.Errorf("build balancer for route %q: %w", rt.Name, err)
 		}
 
 		methods := make(map[string]struct{}, len(rt.Methods))
@@ -51,7 +53,7 @@ func buildRoutes(cfg config.Config) ([]domain.Route, error) {
 			Name:           rt.Name,
 			Methods:        methods,
 			PathPrefix:     rt.PathPrefix,
-			Upstream:       upstreamURL,
+			Balancer:       bal,
 			TrimPath:       rt.TrimPath,
 			ForwardHeaders: forwardHeaders,
 			CircuitBreaker: toDomainCircuitBreaker(rt.CircuitBreaker),
@@ -86,6 +88,52 @@ func (r *Resolver) Snapshot() []domain.Route {
 	out := make([]domain.Route, len(r.routes))
 	copy(out, r.routes)
 	return out
+}
+
+// buildBalancer constructs a load balancer for a route from either the single
+// `upstream` field or the `upstreams` pool. A single upstream yields a
+// one-element pool, preserving backward compatibility.
+func buildBalancer(rt config.RouteConfig) (*balancer.Balancer, error) {
+	var upstreams []*balancer.Upstream
+
+	if len(rt.Upstreams) > 0 {
+		for _, u := range rt.Upstreams {
+			parsed, err := url.Parse(strings.TrimSpace(u.URL))
+			if err != nil {
+				return nil, fmt.Errorf("parse upstream url %q: %w", u.URL, err)
+			}
+			weight := u.Weight
+			if weight <= 0 {
+				weight = 1
+			}
+			upstreams = append(upstreams, &balancer.Upstream{URL: parsed, Weight: weight})
+		}
+	} else {
+		parsed, err := url.Parse(strings.TrimSpace(rt.Upstream))
+		if err != nil {
+			return nil, fmt.Errorf("parse upstream url %q: %w", rt.Upstream, err)
+		}
+		upstreams = append(upstreams, &balancer.Upstream{URL: parsed, Weight: 1})
+	}
+
+	strategy := balancer.RoundRobin
+	switch strings.ToLower(strings.TrimSpace(rt.LoadBalancing)) {
+	case string(balancer.Weighted):
+		strategy = balancer.Weighted
+	case string(balancer.Random):
+		strategy = balancer.Random
+	}
+
+	var passive balancer.PassiveHealth
+	if rt.HealthCheck != nil {
+		passive = balancer.PassiveHealth{
+			Enabled:          rt.HealthCheck.Passive.Enabled,
+			FailureThreshold: rt.HealthCheck.Passive.FailureThreshold,
+			Cooldown:         time.Duration(rt.HealthCheck.Passive.CooldownMS) * time.Millisecond,
+		}
+	}
+
+	return balancer.New(upstreams, strategy, passive), nil
 }
 
 func toDomainRouteRateLimit(cfg *config.RouteRateLimitConfig) *domain.RouteRateLimit {

@@ -98,11 +98,22 @@ func registerAdminRoutes(engine *gin.Engine, adminCfg config.AdminConfig, resolv
 			}
 			sort.Strings(methods)
 
+			upstreams := make([]gin.H, 0)
+			if route.Balancer != nil {
+				for _, up := range route.Balancer.Upstreams() {
+					upstreams = append(upstreams, gin.H{
+						"url":     up.String(),
+						"weight":  up.Weight,
+						"healthy": !up.Down(),
+					})
+				}
+			}
+
 			payload = append(payload, gin.H{
 				"name":        route.Name,
 				"methods":     methods,
 				"path_prefix": route.PathPrefix,
-				"upstream":    route.Upstream.String(),
+				"upstreams":   upstreams,
 				"trim_path":   route.TrimPath,
 			})
 		}

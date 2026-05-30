@@ -18,9 +18,12 @@ import (
 	"time"
 
 	"api-gateway/internal/app"
+	"api-gateway/internal/balancer"
 	"api-gateway/internal/domain"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/sony/gobreaker"
 )
 
@@ -28,14 +31,36 @@ type contextKey string
 
 const routeKey contextKey = "proxy_route"
 
+// errNoHealthyUpstream is returned by roundTrip when every upstream in a
+// route's pool is currently ejected by passive health checks.
+var errNoHealthyUpstream = errors.New("no healthy upstream available")
+
+// upstreamRequests counts forwarded requests per route and upstream target,
+// labelled by outcome, giving visibility into load-balancing distribution.
+var upstreamRequests = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "gateway_upstream_requests_total",
+		Help: "Total upstream requests handled, by route, upstream target, and outcome.",
+	},
+	[]string{"route", "upstream", "outcome"},
+)
+
+// selectedUpstream carries the upstream actually chosen during forwarding back
+// to ServeHTTP for access logging. roundTrip runs without the gin.Context, so a
+// shared pointer holder bridges the two.
+type selectedUpstream struct {
+	url string
+}
+
 type routeInfo struct {
-	upstream       *url.URL
+	balancer       *balancer.Balancer
 	pathPrefix     string
 	name           string
 	trimPath       bool
 	forwardHeaders map[string]struct{}
 	circuitBreaker *domain.RouteCircuitBreaker
 	retry          *domain.RouteRetry
+	selected       *selectedUpstream
 }
 
 var blockedForwardHeaders = map[string]struct{}{
@@ -97,19 +122,24 @@ func (h *Handler) ServeHTTP(c *gin.Context) {
 		return
 	}
 
+	holder := &selectedUpstream{}
 	info := routeInfo{
-		upstream:       route.Upstream,
+		balancer:       route.Balancer,
 		pathPrefix:     route.PathPrefix,
 		name:           route.Name,
 		trimPath:       route.TrimPath,
 		forwardHeaders: route.ForwardHeaders,
 		circuitBreaker: route.CircuitBreaker,
 		retry:          route.Retry,
+		selected:       holder,
 	}
 
-	// Store route metadata for access logging.
+	// Store route metadata for access logging. The chosen upstream is not known
+	// until forwarding, so seed with a representative target and refine below.
 	c.Set("route_name", route.Name)
-	c.Set("upstream", route.Upstream.String())
+	if ups := route.Balancer.Upstreams(); len(ups) > 0 {
+		c.Set("upstream", ups[0].String())
+	}
 	trimmedPath := c.Request.URL.Path
 	if route.TrimPath {
 		trimmedPath = stripPrefix(c.Request.URL.Path, route.PathPrefix)
@@ -141,6 +171,11 @@ func (h *Handler) ServeHTTP(c *gin.Context) {
 	}()
 
 	h.proxy.ServeHTTP(c.Writer, c.Request)
+
+	// Refine the access-log upstream to the target actually forwarded to.
+	if holder.url != "" {
+		c.Set("upstream", holder.url)
+	}
 }
 
 func (h *Handler) roundTrip(req *http.Request) (*http.Response, error) {
@@ -148,14 +183,39 @@ func (h *Handler) roundTrip(req *http.Request) (*http.Response, error) {
 	maxAttempts := maxRetryAttempts(req, info.retry)
 	backoff := retryBackoff(info.retry)
 
+	// The incoming path is captured once; each attempt rewrites onto its chosen
+	// upstream from this base so retries do not compound path rewrites.
+	incomingPath := req.URL.Path
+
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		up := info.balancer.Next()
+		if up == nil {
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, errNoHealthyUpstream
+		}
+
 		attemptReq, err := cloneRequestForAttempt(req, attempt)
 		if err != nil {
 			return nil, err
 		}
+		rewriteToUpstream(attemptReq, up, info, incomingPath)
+		if info.selected != nil {
+			info.selected.url = up.String()
+		}
 
 		resp, err := h.roundTripWithCircuit(attemptReq, info)
+		// Circuit-breaker rejections (open/half-open-over-limit) mean no request
+		// was ever sent to the upstream, so they must not count against passive
+		// health or the upstream metric — only real transport outcomes should.
+		if !isBreakerRejection(err) {
+			failed := isUpstreamFailure(resp, err)
+			info.balancer.RecordResult(up, failed)
+			recordUpstreamMetric(info.name, up.String(), failed)
+		}
+
 		if !shouldRetry(attemptReq.Method, attempt, maxAttempts, resp, err) {
 			return resp, err
 		}
@@ -169,6 +229,38 @@ func (h *Handler) roundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	return nil, lastErr
+}
+
+// isUpstreamFailure reports whether a forwarding result should count against an
+// upstream's passive health (transport error or a gateway-class 5xx).
+func isUpstreamFailure(resp *http.Response, err error) bool {
+	if err != nil {
+		return true
+	}
+	if resp == nil {
+		return true
+	}
+	switch resp.StatusCode {
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+// isBreakerRejection reports whether err came from the circuit breaker refusing
+// to forward the request (open or half-open-over-limit). In those cases no
+// request reached the upstream, so the outcome must not penalise passive health.
+func isBreakerRejection(err error) bool {
+	return errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests)
+}
+
+func recordUpstreamMetric(route, upstream string, failed bool) {
+	outcome := "success"
+	if failed {
+		outcome = "failure"
+	}
+	upstreamRequests.WithLabelValues(route, upstream, outcome).Inc()
 }
 
 func (h *Handler) roundTripWithCircuit(req *http.Request, info routeInfo) (*http.Response, error) {
@@ -284,22 +376,30 @@ func isIdempotentMethod(method string) bool {
 	}
 }
 
-// director rewrites the outbound request URL to the matched upstream target.
-// httputil.ReverseProxy calls this before forwarding the request.
+// director applies the route's header-forwarding policy. URL/host rewriting is
+// deferred to roundTrip so each retry attempt can target a different upstream
+// chosen by the load balancer (enabling failover). httputil.ReverseProxy calls
+// this before forwarding the request.
+//
+// X-Forwarded-For is appended automatically by httputil.ReverseProxy using
+// req.RemoteAddr after Director returns; no manual handling needed.
 func (h *Handler) director(req *http.Request) {
 	info, ok := req.Context().Value(routeKey).(routeInfo)
 	if !ok {
 		return
 	}
-	target := info.upstream
+	filterForwardHeaders(req, info.forwardHeaders)
+}
+
+// rewriteToUpstream points an outbound request at the chosen upstream target,
+// computing the upstream path from the original incoming path.
+func rewriteToUpstream(req *http.Request, up *balancer.Upstream, info routeInfo, incomingPath string) {
+	target := up.URL
 	req.URL.Scheme = target.Scheme
 	req.URL.Host = target.Host
-	req.URL.Path = upstreamRequestPath(req.URL.Path, info)
-	filterForwardHeaders(req, info.forwardHeaders)
+	req.URL.Path = upstreamRequestPath(incomingPath, info, target)
 	// Preserve the Host header as the upstream host.
 	req.Host = target.Host
-	// X-Forwarded-For is appended automatically by httputil.ReverseProxy
-	// using req.RemoteAddr after Director returns; no manual handling needed.
 }
 
 func filterForwardHeaders(req *http.Request, allow map[string]struct{}) {
@@ -333,7 +433,12 @@ func (h *Handler) errorHandler(w http.ResponseWriter, r *http.Request, err error
 	code := "UPSTREAM_UNAVAILABLE"
 	message := "Upstream request failed"
 
-	if isTimeoutError(err) {
+	switch {
+	case errors.Is(err, errNoHealthyUpstream):
+		status = http.StatusServiceUnavailable
+		code = "NO_HEALTHY_UPSTREAM"
+		message = "No healthy upstream available"
+	case isTimeoutError(err):
 		status = http.StatusGatewayTimeout
 		code = "UPSTREAM_TIMEOUT"
 		message = "Upstream request timed out"
@@ -358,13 +463,22 @@ func isWebSocketUpgrade(r *http.Request) bool {
 // bidirectionally. No timeout is applied — the connection lives until either
 // side closes it.
 func (h *Handler) serveWebSocket(c *gin.Context, info routeInfo) {
-	targetPath := upstreamRequestPath(c.Request.URL.Path, info)
-	upAddr := info.upstream.Host
+	// WebSocket connections are long-lived and not replayable, so a single
+	// upstream is chosen (no failover); passive health still applies.
+	up := info.balancer.Next()
+	if up == nil {
+		domain.WriteError(c, http.StatusServiceUnavailable, "NO_HEALTHY_UPSTREAM", "No healthy upstream available")
+		return
+	}
+	c.Set("upstream", up.String())
+
+	targetPath := upstreamRequestPath(c.Request.URL.Path, info, up.URL)
+	upAddr := up.URL.Host
 
 	// Dial upstream (TLS when scheme is https).
 	var upConn net.Conn
 	var err error
-	if info.upstream.Scheme == "https" {
+	if up.URL.Scheme == "https" {
 		upConn, err = tls.DialWithDialer(
 			&net.Dialer{Timeout: 10 * time.Second},
 			"tcp", upAddr, nil,
@@ -373,14 +487,16 @@ func (h *Handler) serveWebSocket(c *gin.Context, info routeInfo) {
 		upConn, err = net.DialTimeout("tcp", upAddr, 10*time.Second)
 	}
 	if err != nil {
+		info.balancer.RecordResult(up, true)
 		domain.WriteError(c, http.StatusBadGateway, "UPSTREAM_UNAVAILABLE", "Cannot connect to upstream")
 		return
 	}
+	info.balancer.RecordResult(up, false)
 	defer func() { _ = upConn.Close() }()
 
 	// Clone the request and rewrite it for the upstream.
 	upReq := c.Request.Clone(context.Background())
-	upReq.URL.Scheme = info.upstream.Scheme
+	upReq.URL.Scheme = up.URL.Scheme
 	upReq.URL.Host = upAddr
 	upReq.URL.Path = targetPath
 	upReq.Host = upAddr
@@ -441,12 +557,12 @@ func (h *Handler) serveWebSocket(c *gin.Context, info routeInfo) {
 	_, _ = io.Copy(clientConn, upBufReader)
 }
 
-func upstreamRequestPath(incomingPath string, info routeInfo) string {
+func upstreamRequestPath(incomingPath string, info routeInfo, target *url.URL) string {
 	path := incomingPath
 	if info.trimPath {
 		path = stripPrefix(path, info.pathPrefix)
 	}
-	return singleJoiningSlash(info.upstream.Path, path)
+	return singleJoiningSlash(target.Path, path)
 }
 
 func isTimeoutError(err error) bool {

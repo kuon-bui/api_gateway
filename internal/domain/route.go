@@ -1,12 +1,12 @@
 package domain
 
-import "net/url"
+import "api-gateway/internal/balancer"
 
 type Route struct {
 	Name           string
 	Methods        map[string]struct{}
 	PathPrefix     string
-	Upstream       *url.URL
+	Balancer       *balancer.Balancer
 	TrimPath       bool
 	ForwardHeaders map[string]struct{}
 	CircuitBreaker *RouteCircuitBreaker

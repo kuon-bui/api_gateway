@@ -89,4 +89,10 @@ func TestAdminRoutesReturnsConfiguredRoutes(t *testing.T) {
 	if !strings.Contains(body, "\"events\"") {
 		t.Fatalf("expected routes payload to contain route name, got %s", body)
 	}
+	if !strings.Contains(body, "\"upstreams\"") || !strings.Contains(body, "http://localhost:9001") {
+		t.Fatalf("expected routes payload to expose upstreams, got %s", body)
+	}
+	if !strings.Contains(body, "\"healthy\"") {
+		t.Fatalf("expected routes payload to expose upstream health, got %s", body)
+	}
 }
