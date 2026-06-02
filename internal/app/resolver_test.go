@@ -83,14 +83,14 @@ func TestResolverCarriesTrimPath(t *testing.T) {
 				Methods:    []string{"GET"},
 				PathPrefix: "/api",
 				Upstream:   "http://localhost:9001",
-				TrimPath:   true,
+				TrimPath:   "/api",
 				RateLimit: &config.RouteRateLimitConfig{
 					Enabled: true,
 					RPS:     10,
 					Burst:   20,
 				},
 			},
-			{Name: "passthrough", Methods: []string{"GET"}, PathPrefix: "/assets", Upstream: "http://localhost:9002", TrimPath: false},
+			{Name: "passthrough", Methods: []string{"GET"}, PathPrefix: "/assets", Upstream: "http://localhost:9002", TrimPath: ""},
 		},
 	}
 
@@ -103,8 +103,8 @@ func TestResolverCarriesTrimPath(t *testing.T) {
 	if !ok {
 		t.Fatal("expected trimmed route match")
 	}
-	if !trimmedRoute.TrimPath {
-		t.Fatal("expected trim_path=true to be preserved")
+	if trimmedRoute.TrimPath != "/api" {
+		t.Fatal("expected trim_path=\"/api\" to be preserved")
 	}
 	if trimmedRoute.RateLimit == nil {
 		t.Fatal("expected route rate_limit config to be preserved")
@@ -117,8 +117,8 @@ func TestResolverCarriesTrimPath(t *testing.T) {
 	if !ok {
 		t.Fatal("expected passthrough route match")
 	}
-	if passthroughRoute.TrimPath {
-		t.Fatal("expected trim_path=false to be preserved")
+	if passthroughRoute.TrimPath != "" {
+		t.Fatal("expected trim_path=\"\" to be preserved")
 	}
 	if passthroughRoute.RateLimit != nil {
 		t.Fatal("expected nil route rate_limit when not configured")

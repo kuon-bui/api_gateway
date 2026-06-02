@@ -7,7 +7,8 @@ type Route struct {
 	Methods        map[string]struct{}
 	PathPrefix     string
 	Balancer       *balancer.Balancer
-	TrimPath       bool
+	TrimPath       string
+	BypassCORS     bool
 	ForwardHeaders map[string]struct{}
 	CircuitBreaker *RouteCircuitBreaker
 	Retry          *RouteRetry

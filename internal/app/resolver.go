@@ -55,6 +55,7 @@ func buildRoutes(cfg config.Config) ([]domain.Route, error) {
 			PathPrefix:     rt.PathPrefix,
 			Balancer:       bal,
 			TrimPath:       rt.TrimPath,
+			BypassCORS:     rt.BypassCORS,
 			ForwardHeaders: forwardHeaders,
 			CircuitBreaker: toDomainCircuitBreaker(rt.CircuitBreaker),
 			Retry:          toDomainRetry(rt.Retry),

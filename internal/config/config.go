@@ -118,7 +118,8 @@ type RouteConfig struct {
 	Upstreams      []UpstreamConfig           `yaml:"upstreams,omitempty"   mapstructure:"upstreams"`
 	LoadBalancing  string                     `yaml:"load_balancing,omitempty" mapstructure:"load_balancing"`
 	HealthCheck    *RouteHealthCheckConfig    `yaml:"health_check,omitempty" mapstructure:"health_check"`
-	TrimPath       bool                       `yaml:"trim_path"   mapstructure:"trim_path"`
+	TrimPath       string                     `yaml:"trim_path"   mapstructure:"trim_path"`
+	BypassCORS     bool                       `yaml:"bypass_cors" mapstructure:"bypass_cors"`
 	ForwardHeaders []string                   `yaml:"forward_headers,omitempty" mapstructure:"forward_headers"`
 	CircuitBreaker *RouteCircuitBreakerConfig `yaml:"circuit_breaker,omitempty" mapstructure:"circuit_breaker"`
 	Retry          *RouteRetryConfig          `yaml:"retry,omitempty" mapstructure:"retry"`

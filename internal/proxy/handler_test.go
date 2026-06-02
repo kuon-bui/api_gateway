@@ -117,7 +117,7 @@ func TestServeHTTPTrimPathEnabled(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := NewHandler(testResolverWithRoute(t, upstream.URL+"/api", "/events", true), 40*time.Millisecond)
+	h := NewHandler(testResolverWithRoute(t, upstream.URL+"/api", "/events", "/events"), 40*time.Millisecond)
 	engine := gin.New()
 	engine.NoRoute(func(c *gin.Context) {
 		h.ServeHTTP(c)
@@ -155,7 +155,7 @@ func TestServeHTTPTrimPathDisabled(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h := NewHandler(testResolverWithRoute(t, upstream.URL+"/api", "/events", false), 40*time.Millisecond)
+	h := NewHandler(testResolverWithRoute(t, upstream.URL+"/api", "/events", ""), 40*time.Millisecond)
 	engine := gin.New()
 	engine.NoRoute(func(c *gin.Context) {
 		h.ServeHTTP(c)
@@ -476,10 +476,10 @@ func TestBreakerRejectionDoesNotEjectPassiveHealth(t *testing.T) {
 
 func testResolver(t *testing.T, upstreamURL string) *app.Resolver {
 	t.Helper()
-	return testResolverWithRoute(t, upstreamURL, "/events", false)
+	return testResolverWithRoute(t, upstreamURL, "/events", "")
 }
 
-func testResolverWithRoute(t *testing.T, upstreamURL, pathPrefix string, trimPath bool) *app.Resolver {
+func testResolverWithRoute(t *testing.T, upstreamURL, pathPrefix string, trimPath string) *app.Resolver {
 	t.Helper()
 
 	resolver, err := app.NewResolver(config.Config{

@@ -56,17 +56,30 @@ type routeInfo struct {
 	balancer       *balancer.Balancer
 	pathPrefix     string
 	name           string
-	trimPath       bool
+	trimPath       string
+	bypassCORS     bool
 	forwardHeaders map[string]struct{}
 	circuitBreaker *domain.RouteCircuitBreaker
 	retry          *domain.RouteRetry
 	selected       *selectedUpstream
 }
 
-var blockedForwardHeaders = map[string]struct{}{
-	"Authorization": {},
-	"Cookie":        {},
-	"Set-Cookie":    {},
+var blockedForwardHeaders = map[string]struct{}{}
+
+// standardForwardHeaders are always forwarded regardless of the route's
+// forward_headers allowlist, since they are required for correct HTTP semantics.
+var standardForwardHeaders = map[string]struct{}{
+	"Content-Type":     {},
+	"Content-Length":   {},
+	"Content-Encoding": {},
+	"Accept":           {},
+	"Accept-Encoding":  {},
+	"Accept-Language":  {},
+	"Cache-Control":    {},
+	"User-Agent":       {},
+	"Authorization":    {},
+	"Cookie":           {},
+	"Set-Cookie":       {},
 }
 
 // Handler forwards matched requests to upstream services via httputil.ReverseProxy.
@@ -128,10 +141,19 @@ func (h *Handler) ServeHTTP(c *gin.Context) {
 		pathPrefix:     route.PathPrefix,
 		name:           route.Name,
 		trimPath:       route.TrimPath,
+		bypassCORS:     route.BypassCORS,
 		forwardHeaders: route.ForwardHeaders,
 		circuitBreaker: route.CircuitBreaker,
 		retry:          route.Retry,
 		selected:       holder,
+	}
+
+	if route.BypassCORS {
+		setCORSHeaders(c, c.Request.Header.Get("Origin"))
+		if c.Request.Method == http.MethodOptions {
+			c.Status(http.StatusNoContent)
+			return
+		}
 	}
 
 	// Store route metadata for access logging. The chosen upstream is not known
@@ -141,8 +163,8 @@ func (h *Handler) ServeHTTP(c *gin.Context) {
 		c.Set("upstream", ups[0].String())
 	}
 	trimmedPath := c.Request.URL.Path
-	if route.TrimPath {
-		trimmedPath = stripPrefix(c.Request.URL.Path, route.PathPrefix)
+	if route.TrimPath != "" {
+		trimmedPath = stripPrefix(c.Request.URL.Path, route.TrimPath)
 	}
 	c.Set("trimmed_path", trimmedPath)
 
@@ -410,13 +432,15 @@ func filterForwardHeaders(req *http.Request, allow map[string]struct{}) {
 		return
 	}
 
-	filtered := make(http.Header, len(allow))
+	filtered := make(http.Header, len(allow)+len(standardForwardHeaders))
 	for k, vv := range req.Header {
 		canonical := textproto.CanonicalMIMEHeaderKey(k)
 		if _, blocked := blockedForwardHeaders[canonical]; blocked {
 			continue
 		}
-		if _, ok := allow[canonical]; !ok {
+		_, isStandard := standardForwardHeaders[canonical]
+		_, isAllowed := allow[canonical]
+		if !isStandard && !isAllowed {
 			continue
 		}
 		for _, v := range vv {
@@ -557,10 +581,21 @@ func (h *Handler) serveWebSocket(c *gin.Context, info routeInfo) {
 	_, _ = io.Copy(clientConn, upBufReader)
 }
 
+func setCORSHeaders(c *gin.Context, origin string) {
+	if origin == "" {
+		origin = "*"
+	}
+	c.Header("Access-Control-Allow-Origin", origin)
+	c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+	c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID, X-Correlation-ID, x-app-key")
+	c.Header("Access-Control-Allow-Credentials", "true")
+	c.Header("Access-Control-Max-Age", "86400")
+}
+
 func upstreamRequestPath(incomingPath string, info routeInfo, target *url.URL) string {
 	path := incomingPath
-	if info.trimPath {
-		path = stripPrefix(path, info.pathPrefix)
+	if info.trimPath != "" {
+		path = stripPrefix(path, info.trimPath)
 	}
 	return singleJoiningSlash(target.Path, path)
 }
