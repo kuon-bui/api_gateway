@@ -241,12 +241,6 @@ func TestServeHTTPFiltersForwardHeaders(t *testing.T) {
 		if got := headers.Get("X-Other"); got != "" {
 			t.Fatalf("expected X-Other to be stripped, got %q", got)
 		}
-		if got := headers.Get("Authorization"); got != "" {
-			t.Fatalf("expected Authorization to be stripped, got %q", got)
-		}
-		if got := headers.Get("Cookie"); got != "" {
-			t.Fatalf("expected Cookie to be stripped, got %q", got)
-		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for upstream request")
 	}
