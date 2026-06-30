@@ -26,7 +26,7 @@ func AccessLog(logger *logrus.Logger) gin.HandlerFunc {
 				"method":     c.Request.Method,
 				"path":       c.Request.URL.Path,
 				"status":     http.StatusSwitchingProtocols,
-				"latency_ms": int64(0),
+				"latency":    time.Duration(0),
 				"route_name": "",
 				"upstream":   "",
 				"protocol":   "websocket",
@@ -59,7 +59,7 @@ func AccessLog(logger *logrus.Logger) gin.HandlerFunc {
 			"method":     c.Request.Method,
 			"path":       pathDisplay,
 			"status":     status,
-			"latency_ms": latency.Milliseconds(),
+			"latency":    latency,
 			"route_name": routeNameStr,
 			"upstream":   toString(upstream),
 		}

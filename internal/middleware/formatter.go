@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/sirupsen/logrus"
 )
@@ -25,7 +26,7 @@ const (
 	statusWidth    = 3
 	methodWidth    = 4
 	pathWidth      = 80
-	latencyWidth   = 6
+	latencyWidth   = 9
 	routeWidth     = 10
 	requestIDWidth = 32
 	pathEllipsis   = "..."
@@ -57,7 +58,7 @@ func (f *AccessLogFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 	status, _ := entry.Data["status"].(int)
 	method, _ := entry.Data["method"].(string)
 	path, _ := entry.Data["path"].(string)
-	latencyMS, _ := entry.Data["latency_ms"].(int64)
+	latency, _ := entry.Data["latency"].(time.Duration)
 	routeName, _ := entry.Data["route_name"].(string)
 	requestID, _ := entry.Data["request_id"].(string)
 
@@ -65,8 +66,8 @@ func (f *AccessLogFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 	methodField := fmt.Sprintf("%-*s", methodWidth, trimMethodToWidth(method, methodWidth))
 	pathField := fmt.Sprintf("%-*s", pathWidth, trimPathToWidth(path, pathWidth))
 	latencyDisplay := "-"
-	if latencyMS != 0 {
-		latencyDisplay = fmt.Sprintf("%dms", latencyMS)
+	if latency != 0 {
+		latencyDisplay = formatDuration(latency)
 	}
 
 	latencyField := fmt.Sprintf("%*s", latencyWidth, latencyDisplay)
@@ -97,6 +98,23 @@ func (f *AccessLogFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 	b.WriteByte('\n')
 
 	return b.Bytes(), nil
+}
+
+func formatDuration(d time.Duration) string {
+	switch {
+	case d < time.Microsecond:
+		return fmt.Sprintf("%dns", d.Nanoseconds())
+	case d < time.Millisecond:
+		return fmt.Sprintf("%.2fµs", float64(d.Nanoseconds())/1000.0)
+	case d < time.Second:
+		return fmt.Sprintf("%.2fms", float64(d.Nanoseconds())/1e6)
+	case d < time.Minute:
+		return fmt.Sprintf("%.2fs", d.Seconds())
+	default:
+		mins := int(d.Minutes())
+		secs := d.Seconds() - float64(mins)*60
+		return fmt.Sprintf("%dm%.2fs", mins, secs)
+	}
 }
 
 func bracket(value string) string {
