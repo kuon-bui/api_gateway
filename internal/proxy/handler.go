@@ -194,6 +194,14 @@ func (h *Handler) ServeHTTP(c *gin.Context) {
 
 	h.proxy.ServeHTTP(c.Writer, c.Request)
 
+	// The proxy is mounted on NoRoute, so Gin's serveError has already preset the
+	// status to 404 and appends its own "404 page not found" body unless the
+	// writer reports a write. For an upstream 404 with an empty body nothing ever
+	// calls Write (ReverseProxy's WriteHeader is a no-op once the status already
+	// matches), leaving Written() false and letting Gin overwrite Content-Type.
+	// Flushing here marks the response written; it is a no-op once a body exists.
+	c.Writer.WriteHeaderNow()
+
 	// Refine the access-log upstream to the target actually forwarded to.
 	if holder.url != "" {
 		c.Set("upstream", holder.url)

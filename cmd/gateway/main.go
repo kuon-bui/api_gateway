@@ -25,13 +25,14 @@ func main() {
 	if err != nil {
 		logger.WithError(err).Fatal("failed to load config")
 	}
-
 	shutdownTracing, err := telemetry.Init(context.Background(), cfg.Telemetry)
 	if err != nil {
 		logger.WithError(err).Fatal("failed to initialize telemetry")
 	}
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// shutdown telemetry
+
 		defer cancel()
 		if err := shutdownTracing(ctx); err != nil {
 			logger.WithError(err).Warn("failed to shutdown telemetry")
@@ -96,7 +97,7 @@ func printBanner(cfg config.Config, mode string) {
 	fmt.Printf("│  Mode      %-29s│\n", mode)
 	fmt.Printf("│  Routes    %-29d│\n", len(cfg.Routes))
 	fmt.Println("└─────────────────────────────────────────┘")
-	fmt.Println()
+	fmt.Println("")
 }
 
 func initLogger() *logrus.Logger {
