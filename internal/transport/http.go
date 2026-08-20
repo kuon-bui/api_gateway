@@ -22,7 +22,8 @@ func NewServer(cfg config.Config, logger *logrus.Logger) (*http.Server, *app.Res
 		return nil, nil, fmt.Errorf("build route resolver: %w", err)
 	}
 
-	// gin.SetMode(gin.ReleaseMode)
+	// Gin's own init() reads GIN_MODE, so the mode is set via the environment
+	// (see the startup banner). Calling SetMode here would override that.
 	engine := gin.New()
 	engine.Use(gin.Recovery())
 	if cfg.Telemetry.Enabled {

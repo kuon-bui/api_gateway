@@ -468,6 +468,52 @@ func TestBreakerRejectionDoesNotEjectPassiveHealth(t *testing.T) {
 	}
 }
 
+// TestServeHTTPPreservesEmptyUpstream404 guards against Gin's NoRoute fallback
+// hijacking a relayed 404. Gin presets the status to 404 before running the
+// NoRoute handler, so an upstream 404 with an empty body never triggers a Write
+// on Gin's writer and serveError would append its own "404 page not found" body
+// over a relayed Content-Length: 0 — clobbering Content-Type and logging
+// "wrote more than the declared Content-Length".
+func TestServeHTTPPreservesEmptyUpstream404(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("X-Upstream-Marker", "amz-ads")
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer upstream.Close()
+
+	h := NewHandler(testResolverWithRoute(t, upstream.URL, "/ads", ""), 200*time.Millisecond)
+	engine := gin.New()
+	engine.NoRoute(func(c *gin.Context) { h.ServeHTTP(c) })
+	gateway := httptest.NewServer(engine)
+	defer gateway.Close()
+
+	res, err := gateway.Client().Get(gateway.URL + "/ads/profile")
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	bodyBytes, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected status 404, got %d (body=%q)", res.StatusCode, bodyBytes)
+	}
+	if got := res.Header.Get("Content-Type"); got != "application/json; charset=utf-8" {
+		t.Fatalf("upstream Content-Type was clobbered by Gin's serveError: got %q", got)
+	}
+	if got := res.Header.Get("X-Upstream-Marker"); got != "amz-ads" {
+		t.Fatalf("expected upstream headers to be relayed, got marker %q", got)
+	}
+	if len(bodyBytes) != 0 {
+		t.Fatalf("expected empty body relayed from upstream, got %q", bodyBytes)
+	}
+}
+
 func testResolver(t *testing.T, upstreamURL string) *app.Resolver {
 	t.Helper()
 	return testResolverWithRoute(t, upstreamURL, "/events", "")
